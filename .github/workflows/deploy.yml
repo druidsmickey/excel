@@ -1,0 +1,32 @@
+name: Deploy to droplet
+
+on:
+  push:
+    branches: [master]
+    paths: ['node-app/**', '.github/workflows/deploy.yml']
+  workflow_dispatch:
+
+concurrency: deploy
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up SSH
+        run: |
+          install -m 700 -d ~/.ssh
+          echo "${{ secrets.DROPLET_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "${{ secrets.DROPLET_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Pull, install and restart
+        run: |
+          ssh -i ~/.ssh/deploy_key "${{ secrets.DROPLET_USER }}@${{ secrets.DROPLET_HOST }}" '
+            set -e
+            cd ~/excel
+            git pull --ff-only origin master
+            cd node-app
+            npm ci --omit=dev
+            pm2 restart excel --update-env
+            pm2 save
+          '

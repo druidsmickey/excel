@@ -40,6 +40,36 @@
   .danger { color: #a00; }
   button:disabled { cursor: default; opacity: .45; }
   #sel { color: #555; font-size: 14px; }
+  /* ---- Mobile / touch ---- */
+  html { -webkit-text-size-adjust: 100%; }
+  button, input { touch-action: manipulation; }
+  .scroll { -webkit-overflow-scrolling: touch; }
+  /* Keep the row checkbox + ID visible while scrolling sideways. */
+  th.chk, td.chk, tr.letters th:first-child { position: sticky; left: 0; z-index: 2; width: 58px; min-width: 58px; max-width: 58px; box-sizing: border-box; }
+  th.idc, td.idc, tr.letters th:nth-child(2) { position: sticky; left: 58px; z-index: 2; }
+  th.chk, th.idc { background: #1f4e78; }
+  tr.letters th:first-child, tr.letters th:nth-child(2) { background: #e7e6e6; }
+  td.chk, td.idc { background: #fff; box-shadow: inset -1px 0 0 #ccc; }
+  tbody tr:nth-child(even) td.chk, tbody tr:nth-child(even) td.idc { background: #ddebf7; }
+  tbody tr.selected td.chk, tbody tr.selected td.idc { background: #ffe699; }
+  /* "Select cells" mode (touch has no Ctrl key): taps pick cells instead of editing them. */
+  body.selmode td input { pointer-events: none; }
+  #selMode.on { background: #1f4e78; color: #fff; }
+  @media (max-width: 700px) {
+    body { margin: 10px; }
+    h1 { font-size: 18px; margin: 4px 0; }
+    button { min-height: 40px; padding: 6px 12px; }
+    .actions { gap: 6px; }
+    #sel { flex-basis: 100%; order: 10; }
+    #changePw, #logout { margin-left: 0 !important; }
+    table { min-width: 0; }
+    td input, th input[type=text] { font-size: 16px; }   /* 16px stops iOS zooming into inputs */
+    td input { padding: 10px 8px; }
+    td input.num { min-width: 84px; }
+    td input[type=checkbox], th input[type=checkbox] { width: 22px; height: 22px; }
+    th.sortable, th button { padding-top: 10px; padding-bottom: 10px; }
+    td.del button { min-width: 40px; }
+  }
 </style>
 </head>
 <body>
@@ -48,6 +78,7 @@
   <button id="addTop">+ Add row</button>
   <button id="addColTop">+ Add column</button>
   <span style="width:16px"></span>
+  <button id="selMode" title="Tap cells to select them (for touch screens)">Select cells: off</button>
   <button id="clearCells" disabled>Clear selected cells</button>
   <button id="clear" disabled>Clear selected values</button>
   <button id="delSel" class="danger" disabled>Delete selected</button>
@@ -122,7 +153,7 @@ function updateToolbar() {
   document.getElementById('clearCells').disabled = !n;
   document.getElementById('sel').textContent = (r || c || n)
     ? `Selected: ${n} cell${n === 1 ? '' : 's'}, ${r} row${r === 1 ? '' : 's'}, ${c} column${c === 1 ? '' : 's'}`
-    : 'Ctrl+click cells (Shift+click for a range) then press Delete, or tick rows / columns.';
+    : 'Select cells with Ctrl+click (or the Select cells button on touch screens), then clear them. You can also tick rows / columns.';
   body.querySelectorAll('td[data-cell]').forEach((td) =>
     td.classList.toggle('cellsel', selCells.has(`${td.closest('tr').dataset.id}:${td.dataset.cell}`)));
   body.querySelectorAll('tr').forEach((tr) => tr.classList.toggle('selected', selRows.has(Number(tr.dataset.id))));
@@ -258,7 +289,7 @@ body.addEventListener('mousedown', (e) => {
   const td = e.target.closest('td[data-cell]');
   if (!td) return;
   const cell = cellOf(td);
-  if (e.ctrlKey || e.metaKey) {
+  if (e.ctrlKey || e.metaKey || selectMode) {
     e.preventDefault();
     document.activeElement?.blur();
     const k = cellKey(cell);
@@ -286,6 +317,13 @@ async function clearCells() {
   selCells.clear();
   load(await api('POST', '/api/clear', { cells }));
 }
+let selectMode = false;
+document.getElementById('selMode').addEventListener('click', (e) => {
+  selectMode = !selectMode;
+  document.body.classList.toggle('selmode', selectMode);
+  e.currentTarget.classList.toggle('on', selectMode);
+  e.currentTarget.textContent = `Select cells: ${selectMode ? 'on' : 'off'}`;
+});
 document.getElementById('clearCells').addEventListener('click', clearCells);
 document.addEventListener('keydown', (e) => {
   if (!selCells.size) return;

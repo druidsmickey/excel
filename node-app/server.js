@@ -3,6 +3,7 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 // Load settings (PORT, MONGODB_URI) from .env if it exists; real environment variables win.
 try { process.loadEnvFile(path.join(__dirname, '.env')); } catch {}
@@ -88,11 +89,115 @@ const send = (res, status, obj) => {
   res.end(JSON.stringify(obj));
 };
 
+// ---- Password protection -------------------------------------------------------------------
+// The password is stored in MongoDB (document _id 'auth') as a salted scrypt hash, never as text.
+// On the very first start with an empty database it is seeded from APP_PASSWORD in .env; after
+// that the database is the source of truth and APP_PASSWORD can be removed from .env.
+// Without MongoDB (data.json mode) APP_PASSWORD from .env is used directly.
+// A correct login sets a signed, HttpOnly cookie. The signing key is derived from the stored hash,
+// so servers sharing the database accept each other's cookies and changing the password signs
+// everyone else out.
+const APP_PASSWORD = process.env.APP_PASSWORD;
+const SESSION_DAYS = 7;
+const scrypt = (pw, salt) => new Promise((resolve, reject) =>
+  crypto.scrypt(String(pw), salt, 64, (e, key) => (e ? reject(e) : resolve(key))));
+
+let auth = null;       // { salt: hex, hash: hex }
+let authLoadedAt = 0;
+
+async function makeAuth(password) {
+  const salt = crypto.randomBytes(16);
+  return { salt: salt.toString('hex'), hash: (await scrypt(password, salt)).toString('hex') };
+}
+
+async function loadAuth() {
+  if (!collection) {
+    if (!APP_PASSWORD || APP_PASSWORD.length < 8) throw new Error('Set APP_PASSWORD (at least 8 characters) in .env.');
+    auth = auth || await makeAuth(APP_PASSWORD);
+    return auth;
+  }
+  if (auth && Date.now() - authLoadedAt < 5000) return auth;   // re-check the database every few seconds
+  let doc = await collection.findOne({ _id: 'auth' });
+  if (!doc) {
+    if (!APP_PASSWORD) throw new Error('No password stored yet. Set APP_PASSWORD in .env for the first start.');
+    doc = { _id: 'auth', ...(await makeAuth(APP_PASSWORD)) };
+    await collection.insertOne(doc);
+    console.log('Password saved to the database (hashed). You can remove APP_PASSWORD from .env now.');
+  }
+  auth = { salt: doc.salt, hash: doc.hash };
+  authLoadedAt = Date.now();
+  return auth;
+}
+
+async function checkPassword(pw) {
+  const a = await loadAuth();
+  const key = await scrypt(pw, Buffer.from(a.salt, 'hex'));
+  return crypto.timingSafeEqual(key, Buffer.from(a.hash, 'hex'));
+}
+
+const sign = (s) => crypto.createHmac('sha256', crypto.createHash('sha256').update(auth.hash).digest()).update(s).digest('base64url');
+const same = (a, b) => {
+  const x = crypto.createHash('sha256').update(String(a)).digest();
+  const y = crypto.createHash('sha256').update(String(b)).digest();
+  return crypto.timingSafeEqual(x, y);
+};
+const newToken = () => { const exp = String(Date.now() + SESSION_DAYS * 864e5); return `${exp}.${sign(exp)}`; };
+async function isAuthed(req) {
+  await loadAuth();
+  const m = (req.headers.cookie || '').match(/(?:^|;s*)session=([^;]+)/);
+  if (!m) return false;
+  const [exp, sig] = m[1].split('.');
+  return Boolean(exp && sig) && same(sig, sign(exp)) && Number(exp) > Date.now();
+}
+const cookie = (req, value, maxAge) =>
+  `session=${value}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${maxAge}` +
+  (req.socket.encrypted || req.headers['x-forwarded-proto'] === 'https' ? '; Secure' : '');
+
+// Lock an address out for 15 minutes after 5 wrong passwords.
+const attempts = new Map();
+const MAX_FAILS = 5, LOCK_MS = 15 * 60 * 1000;
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
   const rowMatch = url.pathname.match(/^\/api\/rows(?:\/(\d+))?$/);
   const colMatch = url.pathname.match(/^\/api\/columns(?:\/(\d+))?$/);
   try {
+    if (url.pathname === '/login' && req.method === 'POST') {
+      const ip = req.socket.remoteAddress;
+      const a = attempts.get(ip) || { fails: 0, until: 0 };
+      if (a.until > Date.now()) return send(res, 429, { error: 'Too many attempts. Try again in a few minutes.' });
+      const { password } = await readBody(req);
+      if (typeof password === 'string' && await checkPassword(password)) {
+        attempts.delete(ip);
+        res.setHeader('Set-Cookie', cookie(req, newToken(), SESSION_DAYS * 86400));
+        return send(res, 200, { ok: true });
+      }
+      a.fails += 1;
+      if (a.fails >= MAX_FAILS) { a.fails = 0; a.until = Date.now() + LOCK_MS; }
+      attempts.set(ip, a);
+      return send(res, 401, { error: 'Wrong password' });
+    }
+    if (url.pathname === '/logout' && req.method === 'POST') {
+      res.setHeader('Set-Cookie', cookie(req, '', 0));
+      return send(res, 200, { ok: true });
+    }
+    if (url.pathname === '/api/password' && req.method === 'POST' && (await isAuthed(req))) {
+      if (!collection) return send(res, 400, { error: 'Password is set by APP_PASSWORD in .env when MongoDB is not used.' });
+      const { current, next } = await readBody(req);
+      if (!(await checkPassword(String(current ?? '')))) return send(res, 401, { error: 'Current password is wrong' });
+      if (typeof next !== 'string' || next.length < 8) return send(res, 400, { error: 'New password must be at least 8 characters' });
+      const fresh = await makeAuth(next);
+      await collection.replaceOne({ _id: 'auth' }, { _id: 'auth', ...fresh, changedAt: new Date().toISOString() }, { upsert: true });
+      auth = fresh; authLoadedAt = Date.now();
+      res.setHeader('Set-Cookie', cookie(req, newToken(), SESSION_DAYS * 86400));   // keep this browser logged in
+      return send(res, 200, { ok: true });
+    }
+    if (!(await isAuthed(req))) {
+      if (url.pathname.startsWith('/api/')) return send(res, 401, { error: 'Not logged in' });
+      res.writeHead(200, { 'Content-Type': 'text/html', 'Cache-Control': 'no-store' });
+      return fs.createReadStream(path.join(PUBLIC, 'login.html')).pipe(res);   // login page for every other URL
+    }
+
     // With MongoDB, re-read the table on every API call so several servers sharing one database
     // never overwrite each other with a stale copy.
     if (collection && url.pathname.startsWith('/api/')) {
@@ -196,8 +301,9 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-loadState().then((s) => {
+loadState().then(async (s) => {
   state = s;
+  await loadAuth();
   nextId = state.rows.reduce((m, r) => Math.max(m, r.id), 0) + 1;
   server.listen(PORT, () => console.log(`Row tracker running at http://localhost:${PORT} (storage: ${collection ? 'MongoDB' : 'data.json'})`));
 }).catch((e) => { console.error('Could not start:', e.message); process.exit(1); });

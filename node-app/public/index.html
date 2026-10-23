@@ -52,6 +52,8 @@
   <button id="clear" disabled>Clear selected values</button>
   <button id="delSel" class="danger" disabled>Delete selected</button>
   <span id="sel"></span>
+  <button id="changePw" style="margin-left:auto">Change password</button>
+  <button id="logout">Log out</button>
 </div>
 <div class="scroll">
 <table>
@@ -74,7 +76,10 @@ const stamp = (iso) => {
 };
 const api = (method, url, data) => fetch(url, {
   method, headers: { 'Content-Type': 'application/json' }, body: data ? JSON.stringify(data) : undefined,
-}).then((r) => r.json());
+}).then((r) => {
+  if (r.status === 401) { location.reload(); throw new Error('Session expired'); }   // back to the login page
+  return r.json();
+});
 
 let columns = [];
 let rows = [];
@@ -283,6 +288,20 @@ document.addEventListener('keydown', (e) => {
   if (!selCells.size) return;
   if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); clearCells(); }
   else if (e.key === 'Escape') { selCells.clear(); updateToolbar(); }
+});
+
+document.getElementById('changePw').addEventListener('click', async () => {
+  const current = prompt('Current password:');
+  if (current === null) return;
+  const next = prompt('New password (at least 8 characters):');
+  if (next === null) return;
+  const r = await fetch('/api/password', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ current, next }) });
+  alert(r.ok ? 'Password changed.' : (await r.json()).error);
+});
+
+document.getElementById('logout').addEventListener('click', async () => {
+  await fetch('/logout', { method: 'POST' });
+  location.reload();
 });
 
 document.getElementById('add').addEventListener('click', addRow);

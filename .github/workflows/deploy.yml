@@ -27,6 +27,5 @@ jobs:
             git pull --ff-only origin master
             cd node-app
             npm ci --omit=dev
-            pm2 restart excel --update-env
-            pm2 save
+            docker restart rowtracker
           '

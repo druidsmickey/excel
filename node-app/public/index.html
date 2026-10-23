@@ -293,7 +293,7 @@ document.addEventListener('keydown', (e) => {
 document.getElementById('changePw').addEventListener('click', async () => {
   const current = prompt('Current password:');
   if (current === null) return;
-  const next = prompt('New password (at least 8 characters):');
+  const next = prompt('New password:');
   if (next === null) return;
   const r = await fetch('/api/password', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ current, next }) });
   alert(r.ok ? 'Password changed.' : (await r.json()).error);

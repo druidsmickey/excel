@@ -112,7 +112,7 @@ async function makeAuth(password) {
 
 async function loadAuth() {
   if (!collection) {
-    if (!APP_PASSWORD || APP_PASSWORD.length < 8) throw new Error('Set APP_PASSWORD (at least 8 characters) in .env.');
+    if (!APP_PASSWORD) throw new Error('Set APP_PASSWORD in .env.');
     auth = auth || await makeAuth(APP_PASSWORD);
     return auth;
   }
@@ -185,7 +185,7 @@ const server = http.createServer(async (req, res) => {
       if (!collection) return send(res, 400, { error: 'Password is set by APP_PASSWORD in .env when MongoDB is not used.' });
       const { current, next } = await readBody(req);
       if (!(await checkPassword(String(current ?? '')))) return send(res, 401, { error: 'Current password is wrong' });
-      if (typeof next !== 'string' || next.length < 8) return send(res, 400, { error: 'New password must be at least 8 characters' });
+      if (typeof next !== 'string' || !next) return send(res, 400, { error: 'New password cannot be empty' });
       const fresh = await makeAuth(next);
       await collection.replaceOne({ _id: 'auth' }, { _id: 'auth', ...fresh, changedAt: new Date().toISOString() }, { upsert: true });
       auth = fresh; authLoadedAt = Date.now();

@@ -27,7 +27,7 @@ document.getElementById('f').addEventListener('submit', async (e) => {
   const go = document.getElementById('go'), err = document.getElementById('err');
   go.disabled = true; err.textContent = '';
   try {
-    const r = await fetch('/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: document.getElementById('pw').value }) });
+    const r = await fetch((location.pathname.endsWith('/') ? location.pathname : location.pathname + '/') + 'login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: document.getElementById('pw').value }) });
     if (r.ok) return location.reload();
     err.textContent = (await r.json()).error || 'Login failed';
   } catch { err.textContent = 'Could not reach the server'; }

@@ -99,6 +99,9 @@ const send = (res, status, obj) => {
 // everyone else out.
 const APP_PASSWORD = process.env.APP_PASSWORD;
 const SESSION_DAYS = 7;
+// When served under a sub-path (e.g. /rowtracker behind nginx) set COOKIE_PATH to that path.
+const COOKIE_PATH = process.env.COOKIE_PATH || '/';
+const COOKIE_NAME = 'rowtracker_session';
 const scrypt = (pw, salt) => new Promise((resolve, reject) =>
   crypto.scrypt(String(pw), salt, 64, (e, key) => (e ? reject(e) : resolve(key))));
 
@@ -144,13 +147,13 @@ const same = (a, b) => {
 const newToken = () => { const exp = String(Date.now() + SESSION_DAYS * 864e5); return `${exp}.${sign(exp)}`; };
 async function isAuthed(req) {
   await loadAuth();
-  const m = (req.headers.cookie || '').match(/(?:^|;s*)session=([^;]+)/);
+  const m = (req.headers.cookie || '').match(new RegExp(`(?:^|;\\s*)${COOKIE_NAME}=([^;]+)`));
   if (!m) return false;
   const [exp, sig] = m[1].split('.');
   return Boolean(exp && sig) && same(sig, sign(exp)) && Number(exp) > Date.now();
 }
 const cookie = (req, value, maxAge) =>
-  `session=${value}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${maxAge}` +
+  `${COOKIE_NAME}=${value}; HttpOnly; SameSite=Strict; Path=${COOKIE_PATH}; Max-Age=${maxAge}` +
   (req.socket.encrypted || req.headers['x-forwarded-proto'] === 'https' ? '; Secure' : '');
 
 // Lock an address out for 15 minutes after 5 wrong passwords.
@@ -158,7 +161,7 @@ const attempts = new Map();
 const MAX_FAILS = 5, LOCK_MS = 15 * 60 * 1000;
 
 const server = http.createServer(async (req, res) => {
-  const url = new URL(req.url, 'http://localhost');
+  const url = new URL(req.url.replace(/^\/{2,}/, '/'), 'http://localhost');
   const rowMatch = url.pathname.match(/^\/api\/rows(?:\/(\d+))?$/);
   const colMatch = url.pathname.match(/^\/api\/columns(?:\/(\d+))?$/);
   try {

@@ -74,7 +74,10 @@ const stamp = (iso) => {
   const d = new Date(iso), p = (n) => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 };
-const api = (method, url, data) => fetch(url, {
+// The app may be served from a sub-path (e.g. /rowtracker), so build URLs from the page location.
+const BASE = location.pathname.endsWith('/') ? location.pathname : location.pathname + '/';
+const u = (p) => BASE + p.replace(/^\//, '');
+const api = (method, url, data) => fetch(u(url), {
   method, headers: { 'Content-Type': 'application/json' }, body: data ? JSON.stringify(data) : undefined,
 }).then((r) => {
   if (r.status === 401) { location.reload(); throw new Error('Session expired'); }   // back to the login page
@@ -295,12 +298,12 @@ document.getElementById('changePw').addEventListener('click', async () => {
   if (current === null) return;
   const next = prompt('New password:');
   if (next === null) return;
-  const r = await fetch('/api/password', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ current, next }) });
+  const r = await fetch(u('/api/password'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ current, next }) });
   alert(r.ok ? 'Password changed.' : (await r.json()).error);
 });
 
 document.getElementById('logout').addEventListener('click', async () => {
-  await fetch('/logout', { method: 'POST' });
+  await fetch(u('/logout'), { method: 'POST' });
   location.reload();
 });
 

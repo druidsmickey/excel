@@ -1,0 +1,312 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Row Tracker</title>
+<style>
+  body { font-family: Arial, sans-serif; margin: 24px; color: #222; }
+  h1 { font-size: 20px; }
+  .scroll { overflow-x: auto; }
+  table { border-collapse: collapse; min-width: 720px; }
+  th { background: #1f4e78; color: #fff; padding: 0; text-align: center; white-space: nowrap; }
+  th.plain { padding: 8px 10px; }
+  th .hd { display: flex; align-items: center; }
+  th input[type=text] { background: transparent; color: #fff; border: 0; font: inherit; font-weight: bold; text-align: center; padding: 8px 4px; width: 90px; }
+  th button { background: transparent; color: #cfe2f3; border: 0; padding: 0 6px; }
+  th.sortable { cursor: pointer; user-select: none; }
+  th.sortable:hover, th button.sort:hover { background: #2b6aa0; }
+  th.colsel { outline: 3px solid #ffd966; outline-offset: -3px; }
+  td { border: 1px solid #ccc; padding: 0; }
+  tbody tr:nth-child(even) { background: #ddebf7; }   /* highlight even rows */
+  tbody tr.selected { background: #ffe699 !important; }
+  td.colsel { box-shadow: inset 0 0 0 9999px rgba(255, 217, 102, .45); }
+  td.cellsel { box-shadow: inset 0 0 0 9999px rgba(91, 155, 213, .35), inset 0 0 0 2px #1f4e78; }
+  tr.letters th { background: #e7e6e6; color: #666; font-size: 11px; font-weight: normal; padding: 2px; }
+  .rn { color: #888; font-size: 11px; margin-left: 4px; user-select: none; }
+  td.chk { white-space: nowrap; padding: 0 6px; }
+  th.idc, td.idc { min-width: 240px; }                /* wider ID column */
+  td input { width: 100%; box-sizing: border-box; border: 0; background: transparent; padding: 8px 10px; font: inherit; }
+  td input.code { font-size: 15px; }
+  td input.num { text-align: right; min-width: 90px; }
+  td.chk, th.chk { width: 32px; text-align: center; }
+  td.chk input, th input[type=checkbox] { width: auto; padding: 0; cursor: pointer; }
+  th .hd input[type=checkbox] { margin-left: 6px; }
+  td.total { font-weight: bold; text-align: right; padding: 8px 10px; }
+  td.upd { padding: 8px 10px; white-space: nowrap; color: #444; }
+  td.del { border: 0; background: #fff; padding-left: 6px; }
+  button { font: inherit; cursor: pointer; }
+  .actions { margin: 12px 0; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .danger { color: #a00; }
+  button:disabled { cursor: default; opacity: .45; }
+  #sel { color: #555; font-size: 14px; }
+</style>
+</head>
+<body>
+<h1>Row Tracker</h1>
+<div class="actions">
+  <button id="addTop">+ Add row</button>
+  <button id="addColTop">+ Add column</button>
+  <span style="width:16px"></span>
+  <button id="clearCells" disabled>Clear selected cells</button>
+  <button id="clear" disabled>Clear selected values</button>
+  <button id="delSel" class="danger" disabled>Delete selected</button>
+  <span id="sel"></span>
+</div>
+<div class="scroll">
+<table>
+  <thead id="head"></thead>
+  <tbody id="body"></tbody>
+</table>
+</div>
+<div class="actions">
+  <button id="add">+ Add row</button>
+  <button id="addCol">+ Add column</button>
+  <button id="csv">Download CSV</button>
+</div>
+<script>
+const head = document.getElementById('head');
+const body = document.getElementById('body');
+const fmt = (n) => n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const stamp = (iso) => {
+  const d = new Date(iso), p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+};
+const api = (method, url, data) => fetch(url, {
+  method, headers: { 'Content-Type': 'application/json' }, body: data ? JSON.stringify(data) : undefined,
+}).then((r) => r.json());
+
+let columns = [];
+let rows = [];
+let sort = null;            // { key: 'code' | 'total' | 'upd' | column index, dir: 1 (ascending) | -1 }
+const selRows = new Set();  // selected row ids
+const selCols = new Set();  // selected column indexes
+const selCells = new Set(); // selected single cells, keyed "rowId:col" (col = column index or 'code')
+let anchor = null;          // last clicked cell, for Shift+click ranges
+
+const letters = (n) => { let s = ''; for (n++; n > 0; n = Math.floor((n - 1) / 26)) s = String.fromCharCode(65 + ((n - 1) % 26)) + s; return s; };
+
+const total = (r) => r.values.reduce((a, b) => a + b, 0);
+const sortValue = (r, key) => key === 'code' ? r.code : key === 'total' ? total(r) : key === 'upd' ? r.updatedAt : r.values[key];
+
+function sortedRows() {
+  if (!sort) return rows;
+  return [...rows].sort((a, b) => {
+    const x = sortValue(a, sort.key), y = sortValue(b, sort.key);
+    const c = typeof x === 'string' ? x.localeCompare(y, undefined, { numeric: true, sensitivity: 'base' }) : x - y;
+    return c * sort.dir;
+  });
+}
+
+// First click sorts ascending, second click descending, third click clears the sort.
+function toggleSort(key) {
+  if (!sort || sort.key !== key) sort = { key, dir: 1 };
+  else if (sort.dir === 1) sort.dir = -1;
+  else sort = null;
+  renderAll();
+}
+
+const arrow = (key) => sort && sort.key === key ? (sort.dir === 1 ? ' ▲' : ' ▼') : '';
+
+function updateToolbar() {
+  const r = selRows.size, c = selCols.size, n = selCells.size;
+  document.getElementById('clear').disabled = document.getElementById('delSel').disabled = !(r || c);
+  document.getElementById('clearCells').disabled = !n;
+  document.getElementById('sel').textContent = (r || c || n)
+    ? `Selected: ${n} cell${n === 1 ? '' : 's'}, ${r} row${r === 1 ? '' : 's'}, ${c} column${c === 1 ? '' : 's'}`
+    : 'Ctrl+click cells (Shift+click for a range) then press Delete, or tick rows / columns.';
+  body.querySelectorAll('td[data-cell]').forEach((td) =>
+    td.classList.toggle('cellsel', selCells.has(`${td.closest('tr').dataset.id}:${td.dataset.cell}`)));
+  body.querySelectorAll('tr').forEach((tr) => tr.classList.toggle('selected', selRows.has(Number(tr.dataset.id))));
+  body.querySelectorAll('td[data-col]').forEach((td) => td.classList.toggle('colsel', selCols.has(Number(td.dataset.col))));
+  head.querySelectorAll('th[data-col]').forEach((th) => th.classList.toggle('colsel', selCols.has(Number(th.dataset.col))));
+  const all = head.querySelector('.all');
+  if (all) all.checked = rows.length > 0 && selRows.size === rows.length;
+}
+
+function renderHead() {
+  head.innerHTML = '<tr class="letters"><th></th><th>' + letters(0) + '</th>' +
+    columns.map((_, i) => `<th>${letters(i + 1)}</th>`).join('') + '<th></th><th></th><th></th></tr>' +
+    '<tr><th class="chk"><input type="checkbox" class="all" title="Select all rows"></th>' +
+    '<th class="plain sortable idc" data-key="code">ID' + arrow('code') + '</th>' +
+    columns.map((_, i) => `<th data-col="${i}"><div class="hd"><input type="checkbox" class="pick" title="Select column"><input type="text"><button class="sort" title="Sort">${arrow(i) || '↕'}</button><button class="x" title="Delete column">✕</button></div></th>`).join('') +
+    '<th class="plain sortable" data-key="total">Total' + arrow('total') + '</th>' +
+    '<th class="plain sortable" data-key="upd">Last Updated' + arrow('upd') + '</th><th></th></tr>';
+  head.querySelectorAll('.sortable').forEach((th) => th.addEventListener('click', () => toggleSort(th.dataset.key)));
+  head.querySelector('.all').addEventListener('change', (e) => {
+    selRows.clear();
+    if (e.target.checked) rows.forEach((r) => selRows.add(r.id));
+    updateToolbar();
+  });
+  head.querySelectorAll('.hd').forEach((hd, i) => {
+    const input = hd.querySelector('input[type=text]');
+    input.value = columns[i];
+    const pick = hd.querySelector('.pick');
+    pick.checked = selCols.has(i);
+    pick.addEventListener('change', () => { pick.checked ? selCols.add(i) : selCols.delete(i); updateToolbar(); });
+    hd.querySelector('.sort').addEventListener('click', () => toggleSort(i));
+    input.addEventListener('change', async () => {
+      columns = (await api('PUT', `/api/columns/${i}`, { name: input.value })).columns;
+      renderHead(); updateToolbar();
+    });
+    hd.querySelector('.x').addEventListener('click', async () => {
+      if (!confirm(`Delete column "${columns[i]}" and its data?`)) return;
+      selCols.clear();
+      load(await api('DELETE', `/api/columns/${i}`));
+    });
+  });
+}
+
+function render() {
+  body.innerHTML = '';
+  sortedRows().forEach((row, n) => {
+    const tr = document.createElement('tr');
+    tr.dataset.id = row.id;
+    tr.innerHTML = `<td class="chk"><input type="checkbox" class="pick" title="Select row"><span class="rn">${n + 2}</span></td><td class="idc" data-cell="code"><input type="text" class="code"></td>` +
+      columns.map((_, i) => `<td data-col="${i}" data-cell="${i}"><input class="num" type="number" step="any"></td>`).join('') +
+      '<td class="total"></td><td class="upd"></td><td class="del"><button title="Delete row">✕</button></td>';
+    const pick = tr.querySelector('.pick');
+    pick.checked = selRows.has(row.id);
+    pick.addEventListener('change', () => { pick.checked ? selRows.add(row.id) : selRows.delete(row.id); updateToolbar(); });
+    const inputs = tr.querySelectorAll('input:not(.pick)');
+    inputs[0].value = row.code;
+    row.values.forEach((v, i) => { inputs[i + 1].value = v; });
+    const nums = () => [...inputs].slice(1).map((inp) => parseFloat(inp.value) || 0);
+    const refresh = () => {
+      tr.querySelector('.total').textContent = fmt(nums().reduce((a, b) => a + b, 0));
+      tr.querySelector('.upd').textContent = stamp(row.updatedAt);
+    };
+    refresh();
+    const save = async () => {
+      row.code = inputs[0].value;
+      row.values = nums();
+      row.updatedAt = (await api('PUT', `/api/rows/${row.id}`, row)).updatedAt;
+      refresh();
+    };
+    inputs.forEach((inp, i) => {
+      inp.addEventListener('change', save);
+      if (i > 0) inp.addEventListener('input', () => {   // live total while typing
+        tr.querySelector('.total').textContent = fmt(nums().reduce((a, b) => a + b, 0));
+      });
+    });
+    tr.querySelector('.del button').addEventListener('click', async () => {
+      await api('DELETE', `/api/rows/${row.id}`);
+      rows = rows.filter((r) => r.id !== row.id); selRows.delete(row.id);
+      render(); updateToolbar();
+    });
+    body.appendChild(tr);
+  });
+}
+
+function renderAll() { renderHead(); render(); updateToolbar(); }
+
+function load(state) {
+  columns = state.columns;
+  rows = state.rows;
+  selCells.clear(); anchor = null;
+  // Drop selections that no longer exist.
+  for (const id of [...selRows]) if (!rows.some((r) => r.id === id)) selRows.delete(id);
+  for (const i of [...selCols]) if (i >= columns.length) selCols.delete(i);
+  renderAll();
+}
+
+async function addRow() {
+  const row = await api('POST', '/api/rows', { code: '', values: columns.map(() => 0) });
+  rows.push(row);
+  render(); updateToolbar();
+  const tr = body.querySelector(`tr[data-id="${row.id}"]`);
+  tr.querySelector('input.code').focus();
+  tr.scrollIntoView({ block: 'nearest' });
+}
+
+async function addColumn() {
+  load(await api('POST', '/api/columns', { name: `Value ${columns.length + 1}` }));
+  const input = head.querySelectorAll('.hd input[type=text]')[columns.length - 1];
+  input.focus(); input.select();
+  input.scrollIntoView({ inline: 'nearest' });
+}
+
+const selection = () => ({ rows: [...selRows], columns: [...selCols] });
+
+document.getElementById('clear').addEventListener('click', async () => {
+  const r = selRows.size, c = selCols.size;
+  if (!confirm(`Clear the numbers in ${r} row(s) and ${c} column(s)? IDs are kept.`)) return;
+  load(await api('POST', '/api/clear', selection()));
+});
+
+document.getElementById('delSel').addEventListener('click', async () => {
+  const r = selRows.size, c = selCols.size;
+  if (!confirm(`Permanently delete ${r} row(s) and ${c} column(s)?`)) return;
+  const body = selection();
+  selRows.clear(); selCols.clear();
+  load(await api('POST', '/api/delete', body));
+});
+
+// Cell selection: Ctrl/Cmd+click toggles a cell, Shift+click selects a range, a plain click clears it.
+const cellOf = (td) => ({ id: Number(td.closest('tr').dataset.id), col: td.dataset.cell === 'code' ? 'code' : Number(td.dataset.cell) });
+const cellKey = (c) => `${c.id}:${c.col}`;
+
+body.addEventListener('mousedown', (e) => {
+  const td = e.target.closest('td[data-cell]');
+  if (!td) return;
+  const cell = cellOf(td);
+  if (e.ctrlKey || e.metaKey) {
+    e.preventDefault();
+    document.activeElement?.blur();
+    const k = cellKey(cell);
+    selCells.has(k) ? selCells.delete(k) : selCells.add(k);
+    anchor = cell;
+  } else if (e.shiftKey && anchor) {
+    e.preventDefault();
+    document.activeElement?.blur();
+    const ids = [...body.querySelectorAll('tr')].map((tr) => Number(tr.dataset.id));
+    const pos = (c) => ({ r: ids.indexOf(c.id), c: c.col === 'code' ? -1 : c.col });
+    const a = pos(anchor), b = pos(cell);
+    selCells.clear();
+    for (let r = Math.min(a.r, b.r); r <= Math.max(a.r, b.r); r++)
+      for (let c = Math.min(a.c, b.c); c <= Math.max(a.c, b.c); c++) selCells.add(`${ids[r]}:${c < 0 ? 'code' : c}`);
+  } else {
+    selCells.clear();
+    anchor = cell;
+  }
+  updateToolbar();
+});
+
+async function clearCells() {
+  const cells = [...selCells].map((k) => { const [id, col] = k.split(':'); return { id: Number(id), col: col === 'code' ? 'code' : Number(col) }; });
+  if (!cells.length) return;
+  selCells.clear();
+  load(await api('POST', '/api/clear', { cells }));
+}
+document.getElementById('clearCells').addEventListener('click', clearCells);
+document.addEventListener('keydown', (e) => {
+  if (!selCells.size) return;
+  if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); clearCells(); }
+  else if (e.key === 'Escape') { selCells.clear(); updateToolbar(); }
+});
+
+document.getElementById('add').addEventListener('click', addRow);
+document.getElementById('addTop').addEventListener('click', addRow);
+document.getElementById('addCol').addEventListener('click', addColumn);
+document.getElementById('addColTop').addEventListener('click', addColumn);
+// Pressing Enter in the last row adds a new one, like typing down a sheet.
+body.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && e.target.matches('input:not(.pick)') && e.target.closest('tr') === body.lastChild) {
+    e.target.dispatchEvent(new Event('change'));
+    addRow();
+  }
+});
+
+document.getElementById('csv').addEventListener('click', () => {
+  const q = (s) => `"${String(s).replace(/"/g, '""')}"`;
+  const lines = [['ID', ...columns, 'Total', 'Last Updated'].map(q).join(',')];
+  for (const r of rows) lines.push([q(r.code), ...r.values, total(r), q(stamp(r.updatedAt))].join(','));
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([lines.join('\n')], { type: 'text/csv' }));
+  a.download = 'rows.csv'; a.click();
+});
+
+api('GET', '/api/data').then(load);
+</script>
+</body>
+</html>

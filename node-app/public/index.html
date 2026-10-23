@@ -25,7 +25,7 @@
   tr.letters th { background: #e7e6e6; color: #666; font-size: 11px; font-weight: normal; padding: 2px; }
   .rn { color: #888; font-size: 11px; margin-left: 4px; user-select: none; }
   td.chk { white-space: nowrap; padding: 0 6px; }
-  th.idc, td.idc { min-width: 240px; }                /* wider ID column */
+  th.idc, td.idc { width: 130px; min-width: 130px; max-width: 130px; }   /* ID column: fits 10 characters */
   td input { width: 100%; box-sizing: border-box; border: 0; background: transparent; padding: 8px 10px; font: inherit; }
   td input.code { font-size: 15px; }
   td input.num { text-align: right; min-width: 90px; }
@@ -170,7 +170,7 @@ function render() {
   sortedRows().forEach((row, n) => {
     const tr = document.createElement('tr');
     tr.dataset.id = row.id;
-    tr.innerHTML = `<td class="chk"><input type="checkbox" class="pick" title="Select row"><span class="rn">${n + 2}</span></td><td class="idc" data-cell="code"><input type="text" class="code"></td>` +
+    tr.innerHTML = `<td class="chk"><input type="checkbox" class="pick" title="Select row"><span class="rn">${n + 2}</span></td><td class="idc" data-cell="code"><input type="text" class="code" maxlength="10"></td>` +
       columns.map((_, i) => `<td data-col="${i}" data-cell="${i}"><input class="num" type="number" step="any"></td>`).join('') +
       '<td class="total"></td><td class="upd"></td><td class="del"><button title="Delete row">✕</button></td>';
     const pick = tr.querySelector('.pick');

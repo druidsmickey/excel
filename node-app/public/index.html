@@ -11,9 +11,10 @@
   table { border-collapse: collapse; min-width: 720px; }
   th { background: #1f4e78; color: #fff; padding: 0; text-align: center; white-space: nowrap; }
   th.plain { padding: 8px 10px; }
-  th .hd { display: flex; align-items: center; }
-  th input[type=text] { background: transparent; color: #fff; border: 0; font: inherit; font-weight: bold; text-align: center; padding: 8px 4px; width: 90px; }
-  th button { background: transparent; color: #cfe2f3; border: 0; padding: 0 6px; }
+  /* Column header: name on top, select / sort / delete controls underneath, so the column can be narrow. */
+  th .hd { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; width: 104px; margin: 0 auto; padding-bottom: 2px; }
+  th input[type=text] { background: transparent; color: #fff; border: 0; font: inherit; font-weight: bold; text-align: center; padding: 6px 4px 2px; order: -1; flex: 0 0 100%; width: 100%; box-sizing: border-box; }
+  th button { background: transparent; color: #cfe2f3; border: 0; padding: 0 8px; }
   th.sortable { cursor: pointer; user-select: none; }
   th.sortable:hover, th button.sort:hover { background: #2b6aa0; }
   th.colsel { outline: 3px solid #ffd966; outline-offset: -3px; }
@@ -25,13 +26,13 @@
   tr.letters th { background: #e7e6e6; color: #666; font-size: 11px; font-weight: normal; padding: 2px; }
   .rn { color: #888; font-size: 11px; margin-left: 4px; user-select: none; }
   td.chk { white-space: nowrap; padding: 0 6px; }
-  th.idc, td.idc { width: 130px; min-width: 130px; max-width: 130px; }   /* ID column: fits 10 characters */
+  th.idc, td.idc { box-sizing: border-box; width: 124px; min-width: 124px; max-width: 124px; }   /* ID column: fits 10 characters */
   td input { width: 100%; box-sizing: border-box; border: 0; background: transparent; padding: 8px 10px; font: inherit; }
   td input.code { font-size: 15px; }
-  td input.num { text-align: right; min-width: 112px; }
+  td input.num { text-align: right; min-width: 96px; padding: 8px; font-size: 14px; }   /* fits 10,000,000 */
   td.chk, th.chk { width: 32px; text-align: center; }
   td.chk input, th input[type=checkbox] { width: auto; padding: 0; cursor: pointer; }
-  th .hd input[type=checkbox] { margin-left: 6px; }
+  th .hd input[type=checkbox] { margin: 0 6px 0 0; }
   td.total { font-weight: bold; text-align: right; padding: 8px 10px; }
   td.upd { padding: 8px 10px; white-space: nowrap; color: #444; }
   td.del { border: 0; background: #fff; padding-left: 6px; }
@@ -81,7 +82,7 @@
     table { min-width: 0; }
     td input, th input[type=text] { font-size: 16px; }   /* 16px stops iOS zooming into inputs */
     td input { padding: 10px 8px; }
-    td input.num { min-width: 104px; }
+    td input.num { min-width: 106px; }
     td input[type=checkbox], th input[type=checkbox] { width: 22px; height: 22px; }
     th.sortable, th button { padding-top: 10px; padding-bottom: 10px; }
     td.del button { min-width: 40px; }
@@ -126,6 +127,8 @@ const foot = document.getElementById('foot');
 // Numbers are shown with thousands separators, e.g. 12,345,678 (decimals only when there are some).
 const fmt = (n) => n.toLocaleString('en-US', { maximumFractionDigits: 6 });
 const parseNum = (str) => parseFloat(String(str).replace(/,/g, '')) || 0;   // reads "1,234.5" or "1234.5"
+const MAX_VALUE = 10000000;   // largest number a cell can hold (the server enforces this too)
+const limit = (n) => Math.max(-MAX_VALUE, Math.min(MAX_VALUE, n));
 const stamp = (iso) => {
   const d = new Date(iso), p = (n) => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
@@ -264,7 +267,7 @@ function render() {
     const tr = document.createElement('tr');
     tr.dataset.id = row.id;
     tr.innerHTML = `<td class="chk"><input type="checkbox" class="pick" title="Select row"><span class="rn">${n + 2}</span></td><td class="idc" data-cell="code"><input type="text" class="code" maxlength="10"></td>` +
-      columns.map((_, i) => `<td data-col="${i}" data-cell="${i}"><input class="num" type="text" inputmode="decimal" autocomplete="off"></td>`).join('') +
+      columns.map((_, i) => `<td data-col="${i}" data-cell="${i}"><input class="num" type="text" inputmode="decimal" autocomplete="off" maxlength="12"></td>`).join('') +
       '<td class="total"></td><td class="upd"></td><td class="del"><button title="Delete row">✕</button></td>';
     const pick = tr.querySelector('.pick');
     pick.checked = selRows.has(row.id);
@@ -477,11 +480,12 @@ body.addEventListener('wheel', (e) => {
 body.addEventListener('focusin', (e) => { if (e.target.matches('input.num')) e.target.value = e.target.value.replace(/,/g, ''); });
 body.addEventListener('input', (e) => {
   if (!e.target.matches('input.num')) return;
-  const clean = e.target.value.replace(/[^0-9.\-]/g, '');   // digits, decimal point and minus only
+  let clean = e.target.value.replace(/[^0-9.\-]/g, '');   // digits, decimal point and minus only
+  if (Math.abs(parseNum(clean)) > MAX_VALUE) clean = String(limit(parseNum(clean)));   // stop at 10,000,000
   if (clean !== e.target.value) e.target.value = clean;
 });
 body.addEventListener('focusout', (e) => {
-  if (e.target.matches('input.num')) e.target.value = fmt(parseNum(e.target.value));
+  if (e.target.matches('input.num')) e.target.value = fmt(limit(parseNum(e.target.value)));
 });
 
 // Clicking or tabbing into a cell selects its whole value, so typing replaces it.

@@ -78,12 +78,15 @@ const exclusive = (fn) => {
   return run;
 };
 
+const MAX_VALUE = 10000000;   // largest number allowed in a value cell
+
 function clean(body) {
   const code = String(body.code ?? '').trim().slice(0, 50);
   const values = state.columns.map((_, i) => {
     const n = parseFloat(body.values?.[i]);
     return Number.isFinite(n) ? n : 0;
   });
+  if (values.some((v) => Math.abs(v) > MAX_VALUE)) throw new Error('Values cannot be larger than 10,000,000');
   return { code, values };
 }
 

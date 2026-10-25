@@ -15,7 +15,7 @@ const PUBLIC = path.join(__dirname, 'public');
 const DEFAULT_STATE = () => {
   const now = new Date().toISOString();
   return {
-    columns: ['Value 1', 'Value 2', 'Value 3', 'Value 4'],
+    columns: ['', '', '', ''],   // unnamed: the page already labels them B, C, D, E
     rows: [
       { id: 1, code: 'AB101', values: [10, 20, 30, 40], updatedAt: now },
       { id: 2, code: 'XY202', values: [15.5, 25, 35, 45], updatedAt: now },
@@ -67,7 +67,7 @@ function readFile() {
   try {
     const s = JSON.parse(fs.readFileSync(DATA, 'utf8'));
     // older format: rows only, four fixed columns
-    return Array.isArray(s) ? { columns: ['Value 1', 'Value 2', 'Value 3', 'Value 4'], rows: s } : s;
+    return Array.isArray(s) ? { columns: ['', '', '', ''], rows: s } : s;
   } catch {
     return null;
   }
@@ -280,7 +280,7 @@ async function handleApi(req, res, url, rowMatch, colMatch) {
     const idx = colMatch[1] === undefined ? null : Number(colMatch[1]);
     if (req.method === 'POST' && idx === null) {
       const body = await readBody(req);
-      state.columns.push(String(body.name || `Value ${state.columns.length + 1}`).trim().slice(0, 40));
+      state.columns.push(String(body.name ?? '').trim().slice(0, 40));
       state.rows.forEach((r) => r.values.push(0));
       await save();
       return send(res, 201, state);
@@ -288,7 +288,7 @@ async function handleApi(req, res, url, rowMatch, colMatch) {
     if (idx === null || idx >= state.columns.length) return send(res, 404, { error: 'Not found' });
     if (req.method === 'PUT') {
       const body = await readBody(req);
-      state.columns[idx] = String(body.name ?? '').trim().slice(0, 40) || state.columns[idx];
+      state.columns[idx] = String(body.name ?? '').trim().slice(0, 40);
       await save();
       return send(res, 200, state);
     }

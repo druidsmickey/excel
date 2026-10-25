@@ -15,6 +15,7 @@
   th .hd { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; width: 92px; margin: 0 auto; padding-bottom: 2px; }
   th input[type=text] { background: transparent; color: #fff; border: 0; font: inherit; font-weight: bold; text-align: center; padding: 6px 4px 2px; order: -1; flex: 0 0 100%; width: 100%; box-sizing: border-box; }
   th button { background: transparent; color: #cfe2f3; border: 0; padding: 0 8px; }
+  th input[type=text]::placeholder { color: rgba(255, 255, 255, .4); font-weight: normal; }
   th.sortable { cursor: pointer; user-select: none; }
   th.sortable:hover, th button.sort:hover { background: #2b6aa0; }
   th.colsel { outline: 3px solid #ffd966; outline-offset: -3px; }
@@ -260,7 +261,7 @@ function renderHead() {
     columns.map((_, i) => `<th>${letters(i + 1)}</th>`).join('') + '<th></th><th></th></tr>' +
     '<tr><th class="chk"><input type="checkbox" class="all" title="Select all rows"></th>' +
     '<th class="plain sortable idc" data-key="code">ID' + arrow('code') + '</th>' +
-    columns.map((_, i) => `<th data-col="${i}"><div class="hd"><input type="checkbox" class="pick" title="Select column"><input type="text" size="1"><button class="sort" title="Sort">${arrow(i) || '↕'}</button></div></th>`).join('') +
+    columns.map((_, i) => `<th data-col="${i}"><div class="hd"><input type="checkbox" class="pick" title="Select column"><input type="text" size="1" placeholder="name" aria-label="Column name"><button class="sort" title="Sort">${arrow(i) || '↕'}</button></div></th>`).join('') +
     '<th class="plain sortable" data-key="total">Total' + arrow('total') + '</th>' +
     '<th class="plain sortable" data-key="upd">Last Updated' + arrow('upd') + '</th></tr>';
   head.querySelectorAll('.sortable').forEach((th) => th.addEventListener('click', () => toggleSort(th.dataset.key)));
@@ -376,10 +377,9 @@ async function addRow(col = 'code') {
 }
 
 async function addColumn() {
-  load(await api('POST', '/api/columns', { name: `Value ${columns.length + 1}` }));
-  const input = head.querySelectorAll('.hd input[type=text]')[columns.length - 1];
-  input.focus(); input.select();
-  input.scrollIntoView({ inline: 'nearest' });
+  load(await api('POST', '/api/columns', { name: '' }));
+  const cell = body.querySelector(`td[data-cell="${columns.length - 1}"] input`);   // first cell of the new column
+  if (cell) { cell.focus(); cell.scrollIntoView({ block: 'nearest', inline: 'nearest' }); }
 }
 
 const selection = () => ({ rows: [...selRows], columns: [...selCols] });
@@ -542,7 +542,7 @@ activity();
 
 document.getElementById('csv').addEventListener('click', () => {
   const q = (s) => `"${String(s).replace(/"/g, '""')}"`;
-  const lines = [['ID', ...columns, 'Total', 'Last Updated'].map(q).join(',')];
+  const lines = [['ID', ...columns.map((c, i) => c || letters(i + 1)), 'Total', 'Last Updated'].map(q).join(',')];
   for (const r of rows) lines.push([q(r.code), ...r.values, total(r), q(stamp(r.updatedAt))].join(','));
   const a = document.createElement('a');
   a.href = URL.createObjectURL(new Blob([lines.join('\n')], { type: 'text/csv' }));

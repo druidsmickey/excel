@@ -104,6 +104,7 @@
   <button id="delSel" class="danger" disabled>Delete selected</button>
   <span id="sel"></span>
   <button id="undo" disabled title="Undo the last change (Ctrl+Z). Up to 10 changes can be undone.">&#8630; Undo</button>
+  <button id="redo" disabled title="Redo the change you just undid (Ctrl+Y)">&#8631; Redo</button>
   <button id="changePw" style="margin-left:auto">Change password</button>
   <button id="logout">Log out</button>
 </div>
@@ -149,7 +150,7 @@ const api = (method, url, data) => {
     keepalive: true,   // lets a save finish even if the page is closing
   }).then(async (r) => {
     if (r.status === 401) { location.reload(); throw new Error('Session expired'); }   // back to the login page
-    setUndo(Number(r.headers.get('X-Undo-Count')) || 0);
+    setUndo(Number(r.headers.get('X-Undo-Count')) || 0, Number(r.headers.get('X-Redo-Count')) || 0);
     const json = await r.json();
     if (!r.ok) throw new Error(json.error || `Server error ${r.status}`);
     return json;
@@ -168,28 +169,33 @@ const api = (method, url, data) => {
 };
 const settled = () => Promise.allSettled([...pending]);
 
-// Undo: the server keeps a copy of the table from before each of the last 10 changes.
+// Undo / Redo: the server keeps a copy of the table from before each of the last 10 changes (and the ones
+// you have undone), so both buttons just ask it to step back or forward.
 const undoBtn = document.getElementById('undo');
-function setUndo(n) {
-  undoBtn.disabled = !n;
-  undoBtn.textContent = n ? `\u21B6 Undo (${n})` : '\u21B6 Undo';
+const redoBtn = document.getElementById('redo');
+function setUndo(undoCount, redoCount) {
+  undoBtn.disabled = !undoCount;
+  undoBtn.textContent = undoCount ? `\u21B6 Undo (${undoCount})` : '\u21B6 Undo';
+  redoBtn.disabled = !redoCount;
+  redoBtn.textContent = redoCount ? `\u21B7 Redo (${redoCount})` : '\u21B7 Redo';
 }
-async function undo() {
-  if (undoBtn.disabled) return;
-  document.activeElement?.blur();   // commit a half-typed cell, then wait for it, so undo reverses the right change
+async function step(kind) {   // kind: 'undo' | 'redo'
+  if ((kind === 'undo' ? undoBtn : redoBtn).disabled) return;
+  document.activeElement?.blur();   // commit a half-typed cell, then wait for it, so we step from the right place
   await settled();
   try {
-    load(await api('POST', '/api/undo'));
-    setStatus('Undone');
-  } catch (e) { setStatus(`Could not undo: ${e.message}`, true); }
+    load(await api('POST', `/api/${kind}`));
+    setStatus(kind === 'undo' ? 'Undone' : 'Redone');
+  } catch (e) { setStatus(`Could not ${kind}: ${e.message}`, true); }
 }
-undoBtn.addEventListener('click', undo);
+undoBtn.addEventListener('click', () => step('undo'));
+redoBtn.addEventListener('click', () => step('redo'));
 document.addEventListener('keydown', (e) => {
-  // Ctrl/Cmd+Z undoes the last change, except while typing in a box (where it undoes the typing).
-  if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'z' && !e.target.matches('input, textarea')) {
-    e.preventDefault();
-    undo();
-  }
+  // Ctrl/Cmd+Z = undo, Ctrl+Y or Ctrl+Shift+Z = redo, except while typing in a box (where they act on the typing).
+  if (!(e.ctrlKey || e.metaKey) || e.target.matches('input, textarea')) return;
+  const k = e.key.toLowerCase();
+  if (k === 'z' && !e.shiftKey) { e.preventDefault(); step('undo'); }
+  else if (k === 'y' || (k === 'z' && e.shiftKey)) { e.preventDefault(); step('redo'); }
 });
 window.addEventListener('beforeunload', (e) => { if (pending.size) { e.preventDefault(); e.returnValue = ''; } });
 document.addEventListener('visibilitychange', () => { if (document.hidden) document.activeElement?.blur(); });   // commit a half-typed cell
@@ -254,7 +260,7 @@ function renderHead() {
     columns.map((_, i) => `<th>${letters(i + 1)}</th>`).join('') + '<th></th><th></th></tr>' +
     '<tr><th class="chk"><input type="checkbox" class="all" title="Select all rows"></th>' +
     '<th class="plain sortable idc" data-key="code">ID' + arrow('code') + '</th>' +
-    columns.map((_, i) => `<th data-col="${i}"><div class="hd"><input type="checkbox" class="pick" title="Select column"><input type="text" size="1"><button class="sort" title="Sort">${arrow(i) || '↕'}</button><button class="x" title="Delete column">✕</button></div></th>`).join('') +
+    columns.map((_, i) => `<th data-col="${i}"><div class="hd"><input type="checkbox" class="pick" title="Select column"><input type="text" size="1"><button class="sort" title="Sort">${arrow(i) || '↕'}</button></div></th>`).join('') +
     '<th class="plain sortable" data-key="total">Total' + arrow('total') + '</th>' +
     '<th class="plain sortable" data-key="upd">Last Updated' + arrow('upd') + '</th></tr>';
   head.querySelectorAll('.sortable').forEach((th) => th.addEventListener('click', () => toggleSort(th.dataset.key)));
@@ -273,11 +279,6 @@ function renderHead() {
     input.addEventListener('change', async () => {
       columns = (await api('PUT', `/api/columns/${i}`, { name: input.value })).columns;
       renderHead(); updateToolbar();
-    });
-    hd.querySelector('.x').addEventListener('click', async () => {
-      if (!confirm(`Delete column "${columns[i]}" and its data?`)) return;
-      selCols.clear();
-      load(await api('DELETE', `/api/columns/${i}`));
     });
   });
 }

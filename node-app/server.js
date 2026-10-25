@@ -38,6 +38,7 @@ const HISTORY_MAX = 10;
 const HISTORY_FILE = path.join(__dirname, 'history.json');
 let history = [];          // JSON strings of the table as it was before each recent change, oldest first
 let beforeChange = null;   // the copy for the change being handled right now
+let redoStack = [];        // copies that Redo can bring back after an Undo
 
 async function loadState() {
   if (MONGODB_URI) {
@@ -45,7 +46,8 @@ async function loadState() {
     const client = new MongoClient(MONGODB_URI, { serverSelectionTimeoutMS: 8000 });
     await client.connect();
     collection = client.db(process.env.MONGODB_DB || 'rowtracker').collection('tracker');
-    history = (await collection.findOne({ _id: 'history' }))?.items || [];
+    const saved = await collection.findOne({ _id: 'history' });
+    history = saved?.items || []; redoStack = saved?.redo || [];
     const doc = await collection.findOne({ _id: 'main' });
     if (doc) return { columns: doc.columns, rows: doc.rows };
     // First run on a fresh database: import data.json if there is one, else start with samples.
@@ -53,7 +55,11 @@ async function loadState() {
     await collection.insertOne({ _id: 'main', ...first });
     return first;
   }
-  try { history = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8')); } catch { history = []; }
+  try {
+    const saved = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8'));
+    history = Array.isArray(saved) ? saved : saved.items || [];
+    redoStack = saved.redo || [];
+  } catch { history = []; redoStack = []; }
   return readFile() || DEFAULT_STATE();
 }
 
@@ -72,14 +78,15 @@ function readFile() {
 const persist = () => {
   const snapshot = JSON.stringify(state);
   const items = [...history];
+  const redo = [...redoStack];
   const job = writeQueue.then(() => collection
     ? Promise.all([
       collection.replaceOne({ _id: 'main' }, { _id: 'main', ...JSON.parse(snapshot) }, { upsert: true }),
-      collection.replaceOne({ _id: 'history' }, { _id: 'history', items }, { upsert: true }),
+      collection.replaceOne({ _id: 'history' }, { _id: 'history', items, redo }, { upsert: true }),
     ])
     : Promise.all([
       fs.promises.writeFile(DATA, JSON.stringify(JSON.parse(snapshot), null, 2)),
-      fs.promises.writeFile(HISTORY_FILE, JSON.stringify(items)),
+      fs.promises.writeFile(HISTORY_FILE, JSON.stringify({ items, redo })),
     ])
   );
   writeQueue = job.catch((e) => console.error('Save failed:', e.message));
@@ -88,7 +95,7 @@ const persist = () => {
 
 // Called after a change: keep the "before" copy for undo, then store everything.
 const save = () => {
-  if (beforeChange) { history = [...history, beforeChange].slice(-HISTORY_MAX); beforeChange = null; }
+  if (beforeChange) { history = [...history, beforeChange].slice(-HISTORY_MAX); beforeChange = null; redoStack = []; }   // a new change ends the redo chain
   return persist();
 };
 
@@ -122,7 +129,7 @@ function readBody(req) {
 }
 
 const send = (res, status, obj) => {
-  res.writeHead(status, { 'Content-Type': 'application/json', 'X-Undo-Count': String(history.length) });
+  res.writeHead(status, { 'Content-Type': 'application/json', 'X-Undo-Count': String(history.length), 'X-Redo-Count': String(redoStack.length) });
   res.end(JSON.stringify(obj));
 };
 
@@ -209,15 +216,27 @@ async function handleApi(req, res, url, rowMatch, colMatch) {
       state = { columns: doc.columns, rows: doc.rows };
       nextId = Math.max(nextId, state.rows.reduce((m, r) => Math.max(m, r.id), 0) + 1);
     }
-    history = (await collection.findOne({ _id: 'history' }))?.items || [];
+    const saved = await collection.findOne({ _id: 'history' });
+    history = saved?.items || []; redoStack = saved?.redo || [];
   }
-  beforeChange = (['POST', 'PUT', 'DELETE'].includes(req.method) && url.pathname !== '/api/undo') ? JSON.stringify(state) : null;
+  beforeChange = (['POST', 'PUT', 'DELETE'].includes(req.method) && !['/api/undo', '/api/redo'].includes(url.pathname)) ? JSON.stringify(state) : null;
 
   // Undo the most recent change (up to the last 10).
   if (url.pathname === '/api/undo' && req.method === 'POST') {
     if (!history.length) return send(res, 409, { error: 'Nothing to undo' });
+    redoStack = [...redoStack, JSON.stringify(state)].slice(-HISTORY_MAX);
     state = JSON.parse(history[history.length - 1]);
     history = history.slice(0, -1);
+    await persist();
+    return send(res, 200, state);
+  }
+
+  // Redo: re-apply the change that the last Undo reversed.
+  if (url.pathname === '/api/redo' && req.method === 'POST') {
+    if (!redoStack.length) return send(res, 409, { error: 'Nothing to redo' });
+    history = [...history, JSON.stringify(state)].slice(-HISTORY_MAX);
+    state = JSON.parse(redoStack[redoStack.length - 1]);
+    redoStack = redoStack.slice(0, -1);
     await persist();
     return send(res, 200, state);
   }

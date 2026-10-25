@@ -63,6 +63,13 @@
   #status { font-size: 14px; color: #2e7d32; min-width: 120px; }
   #status.err { color: #a00; font-weight: bold; }
   td.none { text-align: center; color: #666; padding: 16px; }
+  /* No up/down spinner arrows on number cells (arrow keys move between rows instead). */
+  input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+  input[type=number] { -moz-appearance: textfield; appearance: textfield; }
+  /* Totals row */
+  tfoot td { background: #e8eef5; font-weight: bold; text-align: right; padding: 8px 10px; border-top: 2px solid #1f4e78; white-space: nowrap; }
+  tfoot td.chk, tfoot td.idc { background: #e8eef5; text-align: left; }
+  tfoot td.grand { background: #1f4e78; color: #fff; }
   @media (max-width: 700px) {
     body { margin: 10px; }
     h1 { font-size: 18px; margin: 4px 0; }
@@ -104,6 +111,7 @@
 <table>
   <thead id="head"></thead>
   <tbody id="body"></tbody>
+  <tfoot id="foot"></tfoot>
 </table>
 </div>
 <div class="actions">
@@ -114,6 +122,7 @@
 <script>
 const head = document.getElementById('head');
 const body = document.getElementById('body');
+const foot = document.getElementById('foot');
 const fmt = (n) => n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const stamp = (iso) => {
   const d = new Date(iso), p = (n) => String(n).padStart(2, '0');
@@ -288,6 +297,7 @@ function render() {
   });
   if (!shown && rows.length) body.innerHTML = `<tr><td class="none" colspan="${columns.length + 5}">No rows match "${query.replace(/</g, '&lt;')}"</td></tr>`;
   document.getElementById('count').textContent = query ? `${shown} of ${rows.length} rows` : '';
+  updateFooter();
 }
 
 // Search by ID or by any value (including the total). Hidden rows are dropped from the selection so
@@ -302,6 +312,19 @@ document.getElementById('search').addEventListener('input', (e) => {
 document.getElementById('search').addEventListener('keydown', (e) => {
   if (e.key === 'Escape') { e.target.value = ''; e.target.dispatchEvent(new Event('input')); }
 });
+
+// Totals row: the sum of each column and the grand total, for the rows currently shown (so a search
+// gives the total of the matching rows). Read from the cells, so it updates as you type.
+function updateFooter() {
+  const sums = columns.map(() => 0);
+  body.querySelectorAll('td[data-col] input').forEach((inp) => { sums[Number(inp.closest('td').dataset.col)] += parseFloat(inp.value) || 0; });
+  const grand = sums.reduce((a, b) => a + b, 0);
+  foot.innerHTML = `<tr><td class="chk"></td><td class="idc">${query ? 'Filtered total' : 'Total'}</td>` +
+    sums.map((s) => `<td>${fmt(s)}</td>`).join('') +
+    `<td class="grand">${fmt(grand)}</td><td></td><td></td></tr>`;
+}
+body.addEventListener('input', updateFooter);
+body.addEventListener('change', updateFooter);
 
 function renderAll() { renderHead(); render(); updateToolbar(); }
 
@@ -419,27 +442,33 @@ document.getElementById('add').addEventListener('click', () => addRow());
 document.getElementById('addTop').addEventListener('click', () => addRow());
 document.getElementById('addCol').addEventListener('click', addColumn);
 document.getElementById('addColTop').addEventListener('click', addColumn);
-// Enter moves down to the same column in the next row (Shift+Enter moves up), like a spreadsheet.
-// On the last row it adds a new row. Leaving the cell saves it.
+// Enter / Arrow Down move to the same column in the next row; Shift+Enter / Arrow Up move up, like a
+// spreadsheet. Enter on the last row adds a new row. Leaving the cell saves it.
 body.addEventListener('keydown', async (e) => {
-  if (e.key !== 'Enter' || e.isComposing) return;
+  if (!['Enter', 'ArrowDown', 'ArrowUp'].includes(e.key) || e.isComposing) return;
   const input = e.target;
   const td = input.closest('td[data-cell]');
   if (!td || !input.matches('input:not(.pick)')) return;
   e.preventDefault();
   const tr = td.closest('tr');
   const col = td.dataset.cell;
-  const next = e.shiftKey ? tr.previousElementSibling : tr.nextElementSibling;
+  const up = e.key === 'ArrowUp' || (e.key === 'Enter' && e.shiftKey);
+  const next = up ? tr.previousElementSibling : tr.nextElementSibling;
   const target = next?.querySelector(`td[data-cell="${col}"] input`);
   if (target) {
     target.focus();      // moving focus fires 'change' on the cell we left, which saves it
     target.scrollIntoView({ block: 'nearest', inline: 'nearest' });
-  } else if (!e.shiftKey) {
+  } else if (e.key === 'Enter' && !up) {
     input.blur();        // save this cell first; the new row is built after that save finishes
     await settled();
     addRow(col === 'code' ? 'code' : Number(col));
   }
 });
+
+// Scrolling the mouse wheel over a focused number cell must not change its value.
+body.addEventListener('wheel', (e) => {
+  if (e.target.matches('input[type=number]') && document.activeElement === e.target) e.target.blur();
+}, { passive: true });
 
 // Clicking or tabbing into a cell selects its whole value, so typing replaces it.
 let justFocused = false;

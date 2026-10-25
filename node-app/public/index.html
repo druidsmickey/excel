@@ -8,11 +8,11 @@
   body { font-family: Arial, sans-serif; margin: 24px; color: #222; }
   h1 { font-size: 20px; }
   .scroll { overflow-x: auto; }
-  table { border-collapse: collapse; min-width: 720px; }
+  table { border-collapse: collapse; }
   th { background: #1f4e78; color: #fff; padding: 0; text-align: center; white-space: nowrap; }
   th.plain { padding: 8px 10px; }
   /* Column header: name on top, select / sort / delete controls underneath, so the column can be narrow. */
-  th .hd { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; width: 104px; margin: 0 auto; padding-bottom: 2px; }
+  th .hd { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; width: 92px; margin: 0 auto; padding-bottom: 2px; }
   th input[type=text] { background: transparent; color: #fff; border: 0; font: inherit; font-weight: bold; text-align: center; padding: 6px 4px 2px; order: -1; flex: 0 0 100%; width: 100%; box-sizing: border-box; }
   th button { background: transparent; color: #cfe2f3; border: 0; padding: 0 8px; }
   th.sortable { cursor: pointer; user-select: none; }
@@ -29,7 +29,7 @@
   th.idc, td.idc { box-sizing: border-box; width: 124px; min-width: 124px; max-width: 124px; }   /* ID column: fits 10 characters */
   td input { width: 100%; box-sizing: border-box; border: 0; background: transparent; padding: 8px 10px; font: inherit; }
   td input.code { font-size: 15px; }
-  td input.num { text-align: right; min-width: 96px; padding: 8px; font-size: 14px; }   /* fits 10,000,000 */
+  td input.num { text-align: right; min-width: 92px; padding: 8px 6px; font-size: 14px; }   /* fits 10,000,000 */
   td.chk, th.chk { width: 32px; text-align: center; }
   td.chk input, th input[type=checkbox] { width: auto; padding: 0; cursor: pointer; }
   th .hd input[type=checkbox] { margin: 0 6px 0 0; }
@@ -230,7 +230,7 @@ function renderHead() {
     columns.map((_, i) => `<th>${letters(i + 1)}</th>`).join('') + '<th></th><th></th><th></th></tr>' +
     '<tr><th class="chk"><input type="checkbox" class="all" title="Select all rows"></th>' +
     '<th class="plain sortable idc" data-key="code">ID' + arrow('code') + '</th>' +
-    columns.map((_, i) => `<th data-col="${i}"><div class="hd"><input type="checkbox" class="pick" title="Select column"><input type="text"><button class="sort" title="Sort">${arrow(i) || '↕'}</button><button class="x" title="Delete column">✕</button></div></th>`).join('') +
+    columns.map((_, i) => `<th data-col="${i}"><div class="hd"><input type="checkbox" class="pick" title="Select column"><input type="text" size="1"><button class="sort" title="Sort">${arrow(i) || '↕'}</button><button class="x" title="Delete column">✕</button></div></th>`).join('') +
     '<th class="plain sortable" data-key="total">Total' + arrow('total') + '</th>' +
     '<th class="plain sortable" data-key="upd">Last Updated' + arrow('upd') + '</th><th></th></tr>';
   head.querySelectorAll('.sortable').forEach((th) => th.addEventListener('click', () => toggleSort(th.dataset.key)));
@@ -266,8 +266,8 @@ function render() {
     shown++;
     const tr = document.createElement('tr');
     tr.dataset.id = row.id;
-    tr.innerHTML = `<td class="chk"><input type="checkbox" class="pick" title="Select row"><span class="rn">${n + 2}</span></td><td class="idc" data-cell="code"><input type="text" class="code" maxlength="10"></td>` +
-      columns.map((_, i) => `<td data-col="${i}" data-cell="${i}"><input class="num" type="text" inputmode="decimal" autocomplete="off" maxlength="12"></td>`).join('') +
+    tr.innerHTML = `<td class="chk"><input type="checkbox" class="pick" title="Select row"><span class="rn">${n + 2}</span></td><td class="idc" data-cell="code"><input type="text" class="code" maxlength="10" size="1"></td>` +
+      columns.map((_, i) => `<td data-col="${i}" data-cell="${i}"><input class="num" type="text" inputmode="decimal" autocomplete="off" maxlength="12" size="1"></td>`).join('') +
       '<td class="total"></td><td class="upd"></td><td class="del"><button title="Delete row">✕</button></td>';
     const pick = tr.querySelector('.pick');
     pick.checked = selRows.has(row.id);

@@ -55,12 +55,21 @@
   /* "Select cells" mode (touch has no Ctrl key): taps pick cells instead of editing them. */
   body.selmode td input { pointer-events: none; }
   #selMode.on { background: #1f4e78; color: #fff; }
+  /* The cell being edited stands out, and clicking into it selects its whole value. */
+  td:has(input:focus:not(.pick)) { outline: 2px solid #1f4e78; outline-offset: -2px; background: #fff8dc !important; }
+  td input::selection { background: #1f4e78; color: #fff; }
+  #search { padding: 7px 10px; font: inherit; border: 1px solid #aaa; border-radius: 4px; width: 240px; max-width: 100%; box-sizing: border-box; }
+  #count { color: #555; font-size: 14px; }
+  #status { font-size: 14px; color: #2e7d32; min-width: 120px; }
+  #status.err { color: #a00; font-weight: bold; }
+  td.none { text-align: center; color: #666; padding: 16px; }
   @media (max-width: 700px) {
     body { margin: 10px; }
     h1 { font-size: 18px; margin: 4px 0; }
     button { min-height: 40px; padding: 6px 12px; }
     .actions { gap: 6px; }
     #sel { flex-basis: 100%; order: 10; }
+    #search { flex: 1 1 100%; width: 100%; font-size: 16px; }
     #changePw, #logout { margin-left: 0 !important; }
     table { min-width: 0; }
     td input, th input[type=text] { font-size: 16px; }   /* 16px stops iOS zooming into inputs */
@@ -74,6 +83,11 @@
 </head>
 <body>
 <h1>Row Tracker</h1>
+<div class="actions">
+  <input id="search" type="search" placeholder="Search by ID or value..." aria-label="Search rows" autocomplete="off">
+  <span id="count"></span>
+  <span id="status" role="status"></span>
+</div>
 <div class="actions">
   <button id="addTop">+ Add row</button>
   <button id="addColTop">+ Add column</button>
@@ -108,12 +122,45 @@ const stamp = (iso) => {
 // The app may be served from a sub-path (e.g. /rowtracker), so build URLs from the page location.
 const BASE = location.pathname.endsWith('/') ? location.pathname : location.pathname + '/';
 const u = (p) => BASE + p.replace(/^\//, '');
-const api = (method, url, data) => fetch(u(url), {
-  method, headers: { 'Content-Type': 'application/json' }, body: data ? JSON.stringify(data) : undefined,
-}).then((r) => {
-  if (r.status === 401) { location.reload(); throw new Error('Session expired'); }   // back to the login page
-  return r.json();
-});
+// Every request is tracked so we can tell the user whether their changes are saved, wait for
+// them before logging out, and warn before the page is closed while something is still saving.
+const pending = new Set();
+let lastApi = Date.now();
+const statusEl = document.getElementById('status');
+const setStatus = (text, isError) => { statusEl.textContent = text; statusEl.classList.toggle('err', Boolean(isError)); };
+
+const api = (method, url, data) => {
+  lastApi = Date.now();
+  const p = fetch(u(url), {
+    method, headers: { 'Content-Type': 'application/json' }, body: data ? JSON.stringify(data) : undefined,
+    keepalive: true,   // lets a save finish even if the page is closing
+  }).then(async (r) => {
+    if (r.status === 401) { location.reload(); throw new Error('Session expired'); }   // back to the login page
+    const json = await r.json();
+    if (!r.ok) throw new Error(json.error || `Server error ${r.status}`);
+    return json;
+  });
+  if (method !== 'GET') {
+    pending.add(p);
+    setStatus('Saving...');
+    const done = (ok, err) => {
+      pending.delete(p);
+      if (!ok) setStatus(`NOT SAVED: ${err.message}`, true);
+      else if (!pending.size) setStatus('All changes saved');
+    };
+    p.then(() => done(true), (e) => done(false, e));
+  }
+  return p;
+};
+const settled = () => Promise.allSettled([...pending]);
+window.addEventListener('beforeunload', (e) => { if (pending.size) { e.preventDefault(); e.returnValue = ''; } });
+document.addEventListener('visibilitychange', () => { if (document.hidden) document.activeElement?.blur(); });   // commit a half-typed cell
+
+let query = '';   // lower-cased search text
+const matches = (r) => !query ||
+  r.code.toLowerCase().includes(query) ||
+  r.values.some((v) => String(v).includes(query)) ||
+  String(total(r)).includes(query);
 
 let columns = [];
 let rows = [];
@@ -160,7 +207,8 @@ function updateToolbar() {
   body.querySelectorAll('td[data-col]').forEach((td) => td.classList.toggle('colsel', selCols.has(Number(td.dataset.col))));
   head.querySelectorAll('th[data-col]').forEach((th) => th.classList.toggle('colsel', selCols.has(Number(th.dataset.col))));
   const all = head.querySelector('.all');
-  if (all) all.checked = rows.length > 0 && selRows.size === rows.length;
+  const visible = rows.filter(matches);
+  if (all) all.checked = visible.length > 0 && visible.every((r) => selRows.has(r.id));
 }
 
 function renderHead() {
@@ -174,7 +222,7 @@ function renderHead() {
   head.querySelectorAll('.sortable').forEach((th) => th.addEventListener('click', () => toggleSort(th.dataset.key)));
   head.querySelector('.all').addEventListener('change', (e) => {
     selRows.clear();
-    if (e.target.checked) rows.forEach((r) => selRows.add(r.id));
+    if (e.target.checked) rows.filter(matches).forEach((r) => selRows.add(r.id));
     updateToolbar();
   });
   head.querySelectorAll('.hd').forEach((hd, i) => {
@@ -198,7 +246,10 @@ function renderHead() {
 
 function render() {
   body.innerHTML = '';
+  let shown = 0;
   sortedRows().forEach((row, n) => {
+    if (!matches(row)) return;   // row numbers (n + 2) keep their place, so they match the full table
+    shown++;
     const tr = document.createElement('tr');
     tr.dataset.id = row.id;
     tr.innerHTML = `<td class="chk"><input type="checkbox" class="pick" title="Select row"><span class="rn">${n + 2}</span></td><td class="idc" data-cell="code"><input type="text" class="code" maxlength="10"></td>` +
@@ -235,7 +286,22 @@ function render() {
     });
     body.appendChild(tr);
   });
+  if (!shown && rows.length) body.innerHTML = `<tr><td class="none" colspan="${columns.length + 5}">No rows match "${query.replace(/</g, '&lt;')}"</td></tr>`;
+  document.getElementById('count').textContent = query ? `${shown} of ${rows.length} rows` : '';
 }
+
+// Search by ID or by any value (including the total). Hidden rows are dropped from the selection so
+// "Clear selected" / "Delete selected" can never touch rows you can't see.
+document.getElementById('search').addEventListener('input', (e) => {
+  query = e.target.value.trim().toLowerCase();
+  const visible = new Set(rows.filter(matches).map((r) => r.id));
+  for (const id of [...selRows]) if (!visible.has(id)) selRows.delete(id);
+  for (const k of [...selCells]) if (!visible.has(Number(k.split(':')[0]))) selCells.delete(k);
+  render(); updateToolbar();
+});
+document.getElementById('search').addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') { e.target.value = ''; e.target.dispatchEvent(new Event('input')); }
+});
 
 function renderAll() { renderHead(); render(); updateToolbar(); }
 
@@ -249,12 +315,14 @@ function load(state) {
   renderAll();
 }
 
-async function addRow() {
+// Adds an empty row and puts the cursor in column `col` of it ('code' = the ID cell).
+async function addRow(col = 'code') {
+  if (query) { query = ''; document.getElementById('search').value = ''; }   // so the new row is visible
   const row = await api('POST', '/api/rows', { code: '', values: columns.map(() => 0) });
   rows.push(row);
   render(); updateToolbar();
   const tr = body.querySelector(`tr[data-id="${row.id}"]`);
-  tr.querySelector('input.code').focus();
+  tr.querySelector(`td[data-cell="${col}"] input`).focus();
   tr.scrollIntoView({ block: 'nearest' });
 }
 
@@ -341,21 +409,69 @@ document.getElementById('changePw').addEventListener('click', async () => {
 });
 
 document.getElementById('logout').addEventListener('click', async () => {
+  document.activeElement?.blur();
+  await settled();                      // make sure everything typed has been saved
   await fetch(u('/logout'), { method: 'POST' });
   location.reload();
 });
 
-document.getElementById('add').addEventListener('click', addRow);
-document.getElementById('addTop').addEventListener('click', addRow);
+document.getElementById('add').addEventListener('click', () => addRow());
+document.getElementById('addTop').addEventListener('click', () => addRow());
 document.getElementById('addCol').addEventListener('click', addColumn);
 document.getElementById('addColTop').addEventListener('click', addColumn);
-// Pressing Enter in the last row adds a new one, like typing down a sheet.
-body.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter' && e.target.matches('input:not(.pick)') && e.target.closest('tr') === body.lastChild) {
-    e.target.dispatchEvent(new Event('change'));
-    addRow();
+// Enter moves down to the same column in the next row (Shift+Enter moves up), like a spreadsheet.
+// On the last row it adds a new row. Leaving the cell saves it.
+body.addEventListener('keydown', async (e) => {
+  if (e.key !== 'Enter' || e.isComposing) return;
+  const input = e.target;
+  const td = input.closest('td[data-cell]');
+  if (!td || !input.matches('input:not(.pick)')) return;
+  e.preventDefault();
+  const tr = td.closest('tr');
+  const col = td.dataset.cell;
+  const next = e.shiftKey ? tr.previousElementSibling : tr.nextElementSibling;
+  const target = next?.querySelector(`td[data-cell="${col}"] input`);
+  if (target) {
+    target.focus();      // moving focus fires 'change' on the cell we left, which saves it
+    target.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  } else if (!e.shiftKey) {
+    input.blur();        // save this cell first; the new row is built after that save finishes
+    await settled();
+    addRow(col === 'code' ? 'code' : Number(col));
   }
 });
+
+// Clicking or tabbing into a cell selects its whole value, so typing replaces it.
+let justFocused = false;
+body.addEventListener('focusin', (e) => {
+  if (!e.target.matches('td input:not(.pick)')) return;
+  justFocused = true;
+  setTimeout(() => { if (document.activeElement === e.target) e.target.select(); }, 0);
+});
+body.addEventListener('mouseup', (e) => {
+  if (justFocused && e.target.matches('td input:not(.pick)')) e.preventDefault();   // stops the click from clearing the selection
+  justFocused = false;
+});
+
+// Automatic logout after 5 minutes without activity. Any click, key, touch or scroll counts as
+// activity, and keeps the server-side login alive too.
+const IDLE_MS = 5 * 60 * 1000;
+let idleTimer;
+async function idleLogout() {
+  document.activeElement?.blur();      // commit a half-typed cell first
+  await settled();
+  try { await fetch(u('/logout'), { method: 'POST' }); } catch { /* reload below shows the login page anyway */ }
+  try { sessionStorage.setItem('idleLogout', '1'); } catch { /* storage can be blocked */ }
+  location.reload();
+}
+function activity() {
+  clearTimeout(idleTimer);
+  idleTimer = setTimeout(idleLogout, IDLE_MS);
+  if (Date.now() - lastApi > 60e3) api('GET', '/api/ping').catch(() => {});
+}
+['pointerdown', 'pointermove', 'keydown', 'input', 'touchstart', 'scroll', 'wheel']
+  .forEach((ev) => document.addEventListener(ev, activity, { passive: true, capture: true }));
+activity();
 
 document.getElementById('csv').addEventListener('click', () => {
   const q = (s) => `"${String(s).replace(/"/g, '""')}"`;

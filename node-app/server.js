@@ -58,13 +58,24 @@ function readFile() {
   }
 }
 
-// Writes are queued so they land in order.
+// Writes are queued so they land in order. save() resolves once this write is stored, and rejects if it
+// could not be, so the request that changed the data can tell the browser.
 const save = () => {
   const snapshot = JSON.stringify(state);
-  writeQueue = writeQueue.then(() => collection
+  const job = writeQueue.then(() => collection
     ? collection.replaceOne({ _id: 'main' }, { _id: 'main', ...JSON.parse(snapshot) }, { upsert: true })
     : fs.promises.writeFile(DATA, JSON.stringify(JSON.parse(snapshot), null, 2))
-  ).catch((e) => console.error('Save failed:', e.message));
+  );
+  writeQueue = job.catch((e) => console.error('Save failed:', e.message));
+  return job;
+};
+
+// API requests run one at a time (see exclusive below), so a request never sees another one half done.
+let lock = Promise.resolve();
+const exclusive = (fn) => {
+  const run = lock.then(fn);
+  lock = run.catch(() => {});
+  return run;
 };
 
 function clean(body) {
@@ -77,6 +88,7 @@ function clean(body) {
 }
 
 function readBody(req) {
+  if (req.parsedBody) return Promise.resolve(req.parsedBody);
   return new Promise((resolve, reject) => {
     let s = '';
     req.on('data', (c) => { s += c; if (s.length > 1e5) req.destroy(); });
@@ -98,7 +110,9 @@ const send = (res, status, obj) => {
 // so servers sharing the database accept each other's cookies and changing the password signs
 // everyone else out.
 const APP_PASSWORD = process.env.APP_PASSWORD;
-const SESSION_DAYS = 7;
+// A login lasts SESSION_MINUTES (default 5) and is renewed by every API call, so it ends after that
+// much inactivity.
+const SESSION_MIN = Number(process.env.SESSION_MINUTES) || 5;
 // When served under a sub-path (e.g. /rowtracker behind nginx) set COOKIE_PATH to that path.
 const COOKIE_PATH = process.env.COOKIE_PATH || '/';
 const COOKIE_NAME = 'rowtracker_session';
@@ -144,7 +158,7 @@ const same = (a, b) => {
   const y = crypto.createHash('sha256').update(String(b)).digest();
   return crypto.timingSafeEqual(x, y);
 };
-const newToken = () => { const exp = String(Date.now() + SESSION_DAYS * 864e5); return `${exp}.${sign(exp)}`; };
+const newToken = () => { const exp = String(Date.now() + SESSION_MIN * 60e3); return `${exp}.${sign(exp)}`; };
 async function isAuthed(req) {
   await loadAuth();
   const m = (req.headers.cookie || '').match(new RegExp(`(?:^|;\\s*)${COOKIE_NAME}=([^;]+)`));
@@ -160,6 +174,103 @@ const cookie = (req, value, maxAge) =>
 const attempts = new Map();
 const MAX_FAILS = 5, LOCK_MS = 15 * 60 * 1000;
 
+async function handleApi(req, res, url, rowMatch, colMatch) {
+  // With MongoDB, re-read the table on every API call so several servers sharing one database
+  // never overwrite each other with a stale copy.
+  if (collection && url.pathname.startsWith('/api/')) {
+    await writeQueue;
+    const doc = await collection.findOne({ _id: 'main' });
+    if (doc) {
+      state = { columns: doc.columns, rows: doc.rows };
+      nextId = Math.max(nextId, state.rows.reduce((m, r) => Math.max(m, r.id), 0) + 1);
+    }
+  }
+  if (url.pathname === '/api/ping') return send(res, 200, { ok: true });
+  if (url.pathname === '/api/data' && req.method === 'GET') return send(res, 200, state);
+
+  // Bulk actions on a selection: { rows: [row ids], columns: [column indexes] }
+  if ((url.pathname === '/api/clear' || url.pathname === '/api/delete') && req.method === 'POST') {
+    const body = await readBody(req);
+    const ids = new Set((body.rows || []).map(Number));
+    const cols = [...new Set((body.columns || []).map(Number))].filter((i) => i >= 0 && i < state.columns.length);
+    const now = new Date().toISOString();
+    if (url.pathname === '/api/clear') {
+      // Zero the numbers in selected rows (all columns) and selected columns (all rows); IDs are kept.
+      state.rows.forEach((r) => {
+        if (!ids.has(r.id) && !cols.length) return;
+        r.values = r.values.map((v, i) => (ids.has(r.id) || cols.includes(i) ? 0 : v));
+        r.updatedAt = now;
+      });
+      // Individual cells: { id, col } where col is a column index, or 'code' for the ID cell.
+      for (const { id, col } of body.cells || []) {
+        const r = state.rows.find((x) => x.id === Number(id));
+        if (!r) continue;
+        if (col === 'code') r.code = '';
+        else if (Number.isInteger(col) && col >= 0 && col < r.values.length) r.values[col] = 0;
+        else continue;
+        r.updatedAt = now;
+      }
+    } else {
+      state.rows = state.rows.filter((r) => !ids.has(r.id));
+      if (cols.length) {
+        state.columns = state.columns.filter((_, i) => !cols.includes(i));
+        state.rows.forEach((r) => { r.values = r.values.filter((_, i) => !cols.includes(i)); r.updatedAt = now; });
+      }
+    }
+    await save();
+    return send(res, 200, state);
+  }
+
+  if (colMatch) {
+    const idx = colMatch[1] === undefined ? null : Number(colMatch[1]);
+    if (req.method === 'POST' && idx === null) {
+      const body = await readBody(req);
+      state.columns.push(String(body.name || `Value ${state.columns.length + 1}`).trim().slice(0, 40));
+      state.rows.forEach((r) => r.values.push(0));
+      await save();
+      return send(res, 201, state);
+    }
+    if (idx === null || idx >= state.columns.length) return send(res, 404, { error: 'Not found' });
+    if (req.method === 'PUT') {
+      const body = await readBody(req);
+      state.columns[idx] = String(body.name ?? '').trim().slice(0, 40) || state.columns[idx];
+      await save();
+      return send(res, 200, state);
+    }
+    if (req.method === 'DELETE') {
+      const now = new Date().toISOString();
+      state.columns.splice(idx, 1);
+      state.rows.forEach((r) => { r.values.splice(idx, 1); r.updatedAt = now; });
+      await save();
+      return send(res, 200, state);
+    }
+    return send(res, 405, { error: 'Method not allowed' });
+  }
+
+  if (rowMatch) {
+    const id = rowMatch[1] && Number(rowMatch[1]);
+    if (req.method === 'POST' && !id) {
+      const row = { id: nextId++, ...clean(await readBody(req)), updatedAt: new Date().toISOString() };
+      state.rows.push(row); await save();
+      return send(res, 201, row);
+    }
+    const row = state.rows.find((r) => r.id === id);
+    if (!row) return send(res, 404, { error: 'Not found' });
+    if (req.method === 'PUT') {
+      Object.assign(row, clean(await readBody(req)), { updatedAt: new Date().toISOString() });
+      await save();
+      return send(res, 200, row);
+    }
+    if (req.method === 'DELETE') {
+      state.rows = state.rows.filter((r) => r.id !== id); await save();
+      return send(res, 200, { ok: true });
+    }
+    return send(res, 405, { error: 'Method not allowed' });
+  }
+
+  return send(res, 404, { error: 'Not found' });
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url.replace(/^\/{2,}/, '/'), 'http://localhost');
   const rowMatch = url.pathname.match(/^\/api\/rows(?:\/(\d+))?$/);
@@ -172,7 +283,7 @@ const server = http.createServer(async (req, res) => {
       const { password } = await readBody(req);
       if (typeof password === 'string' && await checkPassword(password)) {
         attempts.delete(ip);
-        res.setHeader('Set-Cookie', cookie(req, newToken(), SESSION_DAYS * 86400));
+        res.setHeader('Set-Cookie', cookie(req, newToken(), SESSION_MIN * 60));
         return send(res, 200, { ok: true });
       }
       a.fails += 1;
@@ -192,7 +303,7 @@ const server = http.createServer(async (req, res) => {
       const fresh = await makeAuth(next);
       await collection.replaceOne({ _id: 'auth' }, { _id: 'auth', ...fresh, changedAt: new Date().toISOString() }, { upsert: true });
       auth = fresh; authLoadedAt = Date.now();
-      res.setHeader('Set-Cookie', cookie(req, newToken(), SESSION_DAYS * 86400));   // keep this browser logged in
+      res.setHeader('Set-Cookie', cookie(req, newToken(), SESSION_MIN * 60));   // keep this browser logged in
       return send(res, 200, { ok: true });
     }
     if (!(await isAuthed(req))) {
@@ -201,96 +312,10 @@ const server = http.createServer(async (req, res) => {
       return fs.createReadStream(path.join(PUBLIC, 'login.html')).pipe(res);   // login page for every other URL
     }
 
-    // With MongoDB, re-read the table on every API call so several servers sharing one database
-    // never overwrite each other with a stale copy.
-    if (collection && url.pathname.startsWith('/api/')) {
-      await writeQueue;
-      const doc = await collection.findOne({ _id: 'main' });
-      if (doc) {
-        state = { columns: doc.columns, rows: doc.rows };
-        nextId = Math.max(nextId, state.rows.reduce((m, r) => Math.max(m, r.id), 0) + 1);
-      }
-    }
-    if (url.pathname === '/api/data' && req.method === 'GET') return send(res, 200, state);
-
-    // Bulk actions on a selection: { rows: [row ids], columns: [column indexes] }
-    if ((url.pathname === '/api/clear' || url.pathname === '/api/delete') && req.method === 'POST') {
-      const body = await readBody(req);
-      const ids = new Set((body.rows || []).map(Number));
-      const cols = [...new Set((body.columns || []).map(Number))].filter((i) => i >= 0 && i < state.columns.length);
-      const now = new Date().toISOString();
-      if (url.pathname === '/api/clear') {
-        // Zero the numbers in selected rows (all columns) and selected columns (all rows); IDs are kept.
-        state.rows.forEach((r) => {
-          if (!ids.has(r.id) && !cols.length) return;
-          r.values = r.values.map((v, i) => (ids.has(r.id) || cols.includes(i) ? 0 : v));
-          r.updatedAt = now;
-        });
-        // Individual cells: { id, col } where col is a column index, or 'code' for the ID cell.
-        for (const { id, col } of body.cells || []) {
-          const r = state.rows.find((x) => x.id === Number(id));
-          if (!r) continue;
-          if (col === 'code') r.code = '';
-          else if (Number.isInteger(col) && col >= 0 && col < r.values.length) r.values[col] = 0;
-          else continue;
-          r.updatedAt = now;
-        }
-      } else {
-        state.rows = state.rows.filter((r) => !ids.has(r.id));
-        if (cols.length) {
-          state.columns = state.columns.filter((_, i) => !cols.includes(i));
-          state.rows.forEach((r) => { r.values = r.values.filter((_, i) => !cols.includes(i)); r.updatedAt = now; });
-        }
-      }
-      save();
-      return send(res, 200, state);
-    }
-
-    if (colMatch) {
-      const idx = colMatch[1] === undefined ? null : Number(colMatch[1]);
-      if (req.method === 'POST' && idx === null) {
-        const body = await readBody(req);
-        state.columns.push(String(body.name || `Value ${state.columns.length + 1}`).trim().slice(0, 40));
-        state.rows.forEach((r) => r.values.push(0));
-        save();
-        return send(res, 201, state);
-      }
-      if (idx === null || idx >= state.columns.length) return send(res, 404, { error: 'Not found' });
-      if (req.method === 'PUT') {
-        const body = await readBody(req);
-        state.columns[idx] = String(body.name ?? '').trim().slice(0, 40) || state.columns[idx];
-        save();
-        return send(res, 200, state);
-      }
-      if (req.method === 'DELETE') {
-        const now = new Date().toISOString();
-        state.columns.splice(idx, 1);
-        state.rows.forEach((r) => { r.values.splice(idx, 1); r.updatedAt = now; });
-        save();
-        return send(res, 200, state);
-      }
-      return send(res, 405, { error: 'Method not allowed' });
-    }
-
-    if (rowMatch) {
-      const id = rowMatch[1] && Number(rowMatch[1]);
-      if (req.method === 'POST' && !id) {
-        const row = { id: nextId++, ...clean(await readBody(req)), updatedAt: new Date().toISOString() };
-        state.rows.push(row); save();
-        return send(res, 201, row);
-      }
-      const row = state.rows.find((r) => r.id === id);
-      if (!row) return send(res, 404, { error: 'Not found' });
-      if (req.method === 'PUT') {
-        Object.assign(row, clean(await readBody(req)), { updatedAt: new Date().toISOString() });
-        save();
-        return send(res, 200, row);
-      }
-      if (req.method === 'DELETE') {
-        state.rows = state.rows.filter((r) => r.id !== id); save();
-        return send(res, 200, { ok: true });
-      }
-      return send(res, 405, { error: 'Method not allowed' });
+    if (url.pathname.startsWith('/api/')) {
+      res.setHeader('Set-Cookie', cookie(req, newToken(), SESSION_MIN * 60));   // activity keeps the login alive
+      if (req.method === 'POST' || req.method === 'PUT') req.parsedBody = await readBody(req);   // read before taking the lock
+      return await exclusive(() => handleApi(req, res, url, rowMatch, colMatch));
     }
 
     // Static files

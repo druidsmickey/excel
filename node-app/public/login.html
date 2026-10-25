@@ -22,6 +22,12 @@
   <div id="err"></div>
 </form>
 <script>
+try {
+  if (sessionStorage.getItem('idleLogout')) {
+    sessionStorage.removeItem('idleLogout');
+    document.getElementById('err').textContent = 'You were logged out after 5 minutes of inactivity.';
+  }
+} catch { /* storage can be blocked */ }
 document.getElementById('f').addEventListener('submit', async (e) => {
   e.preventDefault();
   const go = document.getElementById('go'), err = document.getElementById('err');

@@ -35,7 +35,6 @@
   th .hd input[type=checkbox] { margin: 0 6px 0 0; }
   td.total { font-weight: bold; text-align: right; padding: 8px 10px; }
   td.upd { padding: 8px 10px; white-space: nowrap; color: #444; }
-  td.del { border: 0; background: #fff; padding-left: 6px; }
   button { font: inherit; cursor: pointer; }
   .actions { margin: 12px 0; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
   .danger { color: #a00; }
@@ -85,7 +84,6 @@
     td input.num { min-width: 106px; }
     td input[type=checkbox], th input[type=checkbox] { width: 22px; height: 22px; }
     th.sortable, th button { padding-top: 10px; padding-bottom: 10px; }
-    td.del button { min-width: 40px; }
   }
 </style>
 </head>
@@ -105,6 +103,7 @@
   <button id="clear" disabled>Clear selected values</button>
   <button id="delSel" class="danger" disabled>Delete selected</button>
   <span id="sel"></span>
+  <button id="undo" disabled title="Undo the last change (Ctrl+Z). Up to 10 changes can be undone.">&#8630; Undo</button>
   <button id="changePw" style="margin-left:auto">Change password</button>
   <button id="logout">Log out</button>
 </div>
@@ -150,6 +149,7 @@ const api = (method, url, data) => {
     keepalive: true,   // lets a save finish even if the page is closing
   }).then(async (r) => {
     if (r.status === 401) { location.reload(); throw new Error('Session expired'); }   // back to the login page
+    setUndo(Number(r.headers.get('X-Undo-Count')) || 0);
     const json = await r.json();
     if (!r.ok) throw new Error(json.error || `Server error ${r.status}`);
     return json;
@@ -167,6 +167,30 @@ const api = (method, url, data) => {
   return p;
 };
 const settled = () => Promise.allSettled([...pending]);
+
+// Undo: the server keeps a copy of the table from before each of the last 10 changes.
+const undoBtn = document.getElementById('undo');
+function setUndo(n) {
+  undoBtn.disabled = !n;
+  undoBtn.textContent = n ? `\u21B6 Undo (${n})` : '\u21B6 Undo';
+}
+async function undo() {
+  if (undoBtn.disabled) return;
+  document.activeElement?.blur();   // commit a half-typed cell, then wait for it, so undo reverses the right change
+  await settled();
+  try {
+    load(await api('POST', '/api/undo'));
+    setStatus('Undone');
+  } catch (e) { setStatus(`Could not undo: ${e.message}`, true); }
+}
+undoBtn.addEventListener('click', undo);
+document.addEventListener('keydown', (e) => {
+  // Ctrl/Cmd+Z undoes the last change, except while typing in a box (where it undoes the typing).
+  if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'z' && !e.target.matches('input, textarea')) {
+    e.preventDefault();
+    undo();
+  }
+});
 window.addEventListener('beforeunload', (e) => { if (pending.size) { e.preventDefault(); e.returnValue = ''; } });
 document.addEventListener('visibilitychange', () => { if (document.hidden) document.activeElement?.blur(); });   // commit a half-typed cell
 
@@ -227,12 +251,12 @@ function updateToolbar() {
 
 function renderHead() {
   head.innerHTML = '<tr class="letters"><th></th><th>' + letters(0) + '</th>' +
-    columns.map((_, i) => `<th>${letters(i + 1)}</th>`).join('') + '<th></th><th></th><th></th></tr>' +
+    columns.map((_, i) => `<th>${letters(i + 1)}</th>`).join('') + '<th></th><th></th></tr>' +
     '<tr><th class="chk"><input type="checkbox" class="all" title="Select all rows"></th>' +
     '<th class="plain sortable idc" data-key="code">ID' + arrow('code') + '</th>' +
     columns.map((_, i) => `<th data-col="${i}"><div class="hd"><input type="checkbox" class="pick" title="Select column"><input type="text" size="1"><button class="sort" title="Sort">${arrow(i) || '↕'}</button><button class="x" title="Delete column">✕</button></div></th>`).join('') +
     '<th class="plain sortable" data-key="total">Total' + arrow('total') + '</th>' +
-    '<th class="plain sortable" data-key="upd">Last Updated' + arrow('upd') + '</th><th></th></tr>';
+    '<th class="plain sortable" data-key="upd">Last Updated' + arrow('upd') + '</th></tr>';
   head.querySelectorAll('.sortable').forEach((th) => th.addEventListener('click', () => toggleSort(th.dataset.key)));
   head.querySelector('.all').addEventListener('change', (e) => {
     selRows.clear();
@@ -268,7 +292,7 @@ function render() {
     tr.dataset.id = row.id;
     tr.innerHTML = `<td class="chk"><input type="checkbox" class="pick" title="Select row"><span class="rn">${n + 2}</span></td><td class="idc" data-cell="code"><input type="text" class="code" maxlength="10" size="1"></td>` +
       columns.map((_, i) => `<td data-col="${i}" data-cell="${i}"><input class="num" type="text" inputmode="decimal" autocomplete="off" maxlength="12" size="1"></td>`).join('') +
-      '<td class="total"></td><td class="upd"></td><td class="del"><button title="Delete row">✕</button></td>';
+      '<td class="total"></td><td class="upd"></td>';
     const pick = tr.querySelector('.pick');
     pick.checked = selRows.has(row.id);
     pick.addEventListener('change', () => { pick.checked ? selRows.add(row.id) : selRows.delete(row.id); updateToolbar(); });
@@ -293,14 +317,9 @@ function render() {
         tr.querySelector('.total').textContent = fmt(nums().reduce((a, b) => a + b, 0));
       });
     });
-    tr.querySelector('.del button').addEventListener('click', async () => {
-      await api('DELETE', `/api/rows/${row.id}`);
-      rows = rows.filter((r) => r.id !== row.id); selRows.delete(row.id);
-      render(); updateToolbar();
-    });
     body.appendChild(tr);
   });
-  if (!shown && rows.length) body.innerHTML = `<tr><td class="none" colspan="${columns.length + 5}">No rows match "${query.replace(/</g, '&lt;')}"</td></tr>`;
+  if (!shown && rows.length) body.innerHTML = `<tr><td class="none" colspan="${columns.length + 4}">No rows match "${query.replace(/</g, '&lt;')}"</td></tr>`;
   document.getElementById('count').textContent = query ? `${shown} of ${rows.length} rows` : '';
   updateFooter();
 }
@@ -327,7 +346,7 @@ function updateFooter() {
   const grand = sums.reduce((a, b) => a + b, 0);
   foot.innerHTML = `<tr><td class="chk"></td><td class="idc">${query ? 'Filtered total' : 'Total'}</td>` +
     sums.map((s) => `<td>${fmt(s)}</td>`).join('') +
-    `<td class="grand">${fmt(grand)}</td><td></td><td></td></tr>`;
+    `<td class="grand">${fmt(grand)}</td><td></td></tr>`;
 }
 body.addEventListener('input', updateFooter);
 body.addEventListener('change', updateFooter);

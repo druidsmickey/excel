@@ -32,12 +32,20 @@ let state;
 let nextId = 1;
 let writeQueue = Promise.resolve();
 
+// Undo: before each change to the table we remember a copy of it; the last HISTORY_MAX copies are kept
+// (in MongoDB document _id 'history', or history.json) so undo survives restarts.
+const HISTORY_MAX = 10;
+const HISTORY_FILE = path.join(__dirname, 'history.json');
+let history = [];          // JSON strings of the table as it was before each recent change, oldest first
+let beforeChange = null;   // the copy for the change being handled right now
+
 async function loadState() {
   if (MONGODB_URI) {
     const { MongoClient } = require('mongodb');
     const client = new MongoClient(MONGODB_URI, { serverSelectionTimeoutMS: 8000 });
     await client.connect();
     collection = client.db(process.env.MONGODB_DB || 'rowtracker').collection('tracker');
+    history = (await collection.findOne({ _id: 'history' }))?.items || [];
     const doc = await collection.findOne({ _id: 'main' });
     if (doc) return { columns: doc.columns, rows: doc.rows };
     // First run on a fresh database: import data.json if there is one, else start with samples.
@@ -45,6 +53,7 @@ async function loadState() {
     await collection.insertOne({ _id: 'main', ...first });
     return first;
   }
+  try { history = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8')); } catch { history = []; }
   return readFile() || DEFAULT_STATE();
 }
 
@@ -58,16 +67,29 @@ function readFile() {
   }
 }
 
-// Writes are queued so they land in order. save() resolves once this write is stored, and rejects if it
-// could not be, so the request that changed the data can tell the browser.
-const save = () => {
+// Writes are queued so they land in order. persist() resolves once the table and its undo history are
+// stored, and rejects if they could not be, so the request that changed the data can tell the browser.
+const persist = () => {
   const snapshot = JSON.stringify(state);
+  const items = [...history];
   const job = writeQueue.then(() => collection
-    ? collection.replaceOne({ _id: 'main' }, { _id: 'main', ...JSON.parse(snapshot) }, { upsert: true })
-    : fs.promises.writeFile(DATA, JSON.stringify(JSON.parse(snapshot), null, 2))
+    ? Promise.all([
+      collection.replaceOne({ _id: 'main' }, { _id: 'main', ...JSON.parse(snapshot) }, { upsert: true }),
+      collection.replaceOne({ _id: 'history' }, { _id: 'history', items }, { upsert: true }),
+    ])
+    : Promise.all([
+      fs.promises.writeFile(DATA, JSON.stringify(JSON.parse(snapshot), null, 2)),
+      fs.promises.writeFile(HISTORY_FILE, JSON.stringify(items)),
+    ])
   );
   writeQueue = job.catch((e) => console.error('Save failed:', e.message));
   return job;
+};
+
+// Called after a change: keep the "before" copy for undo, then store everything.
+const save = () => {
+  if (beforeChange) { history = [...history, beforeChange].slice(-HISTORY_MAX); beforeChange = null; }
+  return persist();
 };
 
 // API requests run one at a time (see exclusive below), so a request never sees another one half done.
@@ -100,7 +122,7 @@ function readBody(req) {
 }
 
 const send = (res, status, obj) => {
-  res.writeHead(status, { 'Content-Type': 'application/json' });
+  res.writeHead(status, { 'Content-Type': 'application/json', 'X-Undo-Count': String(history.length) });
   res.end(JSON.stringify(obj));
 };
 
@@ -187,6 +209,17 @@ async function handleApi(req, res, url, rowMatch, colMatch) {
       state = { columns: doc.columns, rows: doc.rows };
       nextId = Math.max(nextId, state.rows.reduce((m, r) => Math.max(m, r.id), 0) + 1);
     }
+    history = (await collection.findOne({ _id: 'history' }))?.items || [];
+  }
+  beforeChange = (['POST', 'PUT', 'DELETE'].includes(req.method) && url.pathname !== '/api/undo') ? JSON.stringify(state) : null;
+
+  // Undo the most recent change (up to the last 10).
+  if (url.pathname === '/api/undo' && req.method === 'POST') {
+    if (!history.length) return send(res, 409, { error: 'Nothing to undo' });
+    state = JSON.parse(history[history.length - 1]);
+    history = history.slice(0, -1);
+    await persist();
+    return send(res, 200, state);
   }
   if (url.pathname === '/api/ping') return send(res, 200, { ok: true });
   if (url.pathname === '/api/data' && req.method === 'GET') return send(res, 200, state);

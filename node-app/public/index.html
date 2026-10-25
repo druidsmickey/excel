@@ -28,7 +28,7 @@
   th.idc, td.idc { width: 130px; min-width: 130px; max-width: 130px; }   /* ID column: fits 10 characters */
   td input { width: 100%; box-sizing: border-box; border: 0; background: transparent; padding: 8px 10px; font: inherit; }
   td input.code { font-size: 15px; }
-  td input.num { text-align: right; min-width: 90px; }
+  td input.num { text-align: right; min-width: 112px; }
   td.chk, th.chk { width: 32px; text-align: center; }
   td.chk input, th input[type=checkbox] { width: auto; padding: 0; cursor: pointer; }
   th .hd input[type=checkbox] { margin-left: 6px; }
@@ -81,7 +81,7 @@
     table { min-width: 0; }
     td input, th input[type=text] { font-size: 16px; }   /* 16px stops iOS zooming into inputs */
     td input { padding: 10px 8px; }
-    td input.num { min-width: 84px; }
+    td input.num { min-width: 104px; }
     td input[type=checkbox], th input[type=checkbox] { width: 22px; height: 22px; }
     th.sortable, th button { padding-top: 10px; padding-bottom: 10px; }
     td.del button { min-width: 40px; }
@@ -123,7 +123,9 @@
 const head = document.getElementById('head');
 const body = document.getElementById('body');
 const foot = document.getElementById('foot');
-const fmt = (n) => n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+// Numbers are shown with thousands separators, e.g. 12,345,678 (decimals only when there are some).
+const fmt = (n) => n.toLocaleString('en-US', { maximumFractionDigits: 6 });
+const parseNum = (str) => parseFloat(String(str).replace(/,/g, '')) || 0;   // reads "1,234.5" or "1234.5"
 const stamp = (iso) => {
   const d = new Date(iso), p = (n) => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
@@ -166,10 +168,10 @@ window.addEventListener('beforeunload', (e) => { if (pending.size) { e.preventDe
 document.addEventListener('visibilitychange', () => { if (document.hidden) document.activeElement?.blur(); });   // commit a half-typed cell
 
 let query = '';   // lower-cased search text
+let plain = '';   // the same without thousands commas, for matching raw numbers
 const matches = (r) => !query ||
   r.code.toLowerCase().includes(query) ||
-  r.values.some((v) => String(v).includes(query)) ||
-  String(total(r)).includes(query);
+  [...r.values, total(r)].some((v) => String(v).includes(plain) || fmt(v).includes(query));
 
 let columns = [];
 let rows = [];
@@ -262,15 +264,15 @@ function render() {
     const tr = document.createElement('tr');
     tr.dataset.id = row.id;
     tr.innerHTML = `<td class="chk"><input type="checkbox" class="pick" title="Select row"><span class="rn">${n + 2}</span></td><td class="idc" data-cell="code"><input type="text" class="code" maxlength="10"></td>` +
-      columns.map((_, i) => `<td data-col="${i}" data-cell="${i}"><input class="num" type="number" step="any"></td>`).join('') +
+      columns.map((_, i) => `<td data-col="${i}" data-cell="${i}"><input class="num" type="text" inputmode="decimal" autocomplete="off"></td>`).join('') +
       '<td class="total"></td><td class="upd"></td><td class="del"><button title="Delete row">✕</button></td>';
     const pick = tr.querySelector('.pick');
     pick.checked = selRows.has(row.id);
     pick.addEventListener('change', () => { pick.checked ? selRows.add(row.id) : selRows.delete(row.id); updateToolbar(); });
     const inputs = tr.querySelectorAll('input:not(.pick)');
     inputs[0].value = row.code;
-    row.values.forEach((v, i) => { inputs[i + 1].value = v; });
-    const nums = () => [...inputs].slice(1).map((inp) => parseFloat(inp.value) || 0);
+    row.values.forEach((v, i) => { inputs[i + 1].value = fmt(v); });
+    const nums = () => [...inputs].slice(1).map((inp) => parseNum(inp.value));
     const refresh = () => {
       tr.querySelector('.total').textContent = fmt(nums().reduce((a, b) => a + b, 0));
       tr.querySelector('.upd').textContent = stamp(row.updatedAt);
@@ -304,6 +306,7 @@ function render() {
 // "Clear selected" / "Delete selected" can never touch rows you can't see.
 document.getElementById('search').addEventListener('input', (e) => {
   query = e.target.value.trim().toLowerCase();
+  plain = query.replace(/,/g, '');
   const visible = new Set(rows.filter(matches).map((r) => r.id));
   for (const id of [...selRows]) if (!visible.has(id)) selRows.delete(id);
   for (const k of [...selCells]) if (!visible.has(Number(k.split(':')[0]))) selCells.delete(k);
@@ -317,7 +320,7 @@ document.getElementById('search').addEventListener('keydown', (e) => {
 // gives the total of the matching rows). Read from the cells, so it updates as you type.
 function updateFooter() {
   const sums = columns.map(() => 0);
-  body.querySelectorAll('td[data-col] input').forEach((inp) => { sums[Number(inp.closest('td').dataset.col)] += parseFloat(inp.value) || 0; });
+  body.querySelectorAll('td[data-col] input').forEach((inp) => { sums[Number(inp.closest('td').dataset.col)] += parseNum(inp.value); });
   const grand = sums.reduce((a, b) => a + b, 0);
   foot.innerHTML = `<tr><td class="chk"></td><td class="idc">${query ? 'Filtered total' : 'Total'}</td>` +
     sums.map((s) => `<td>${fmt(s)}</td>`).join('') +
@@ -340,7 +343,7 @@ function load(state) {
 
 // Adds an empty row and puts the cursor in column `col` of it ('code' = the ID cell).
 async function addRow(col = 'code') {
-  if (query) { query = ''; document.getElementById('search').value = ''; }   // so the new row is visible
+  if (query) { query = ''; plain = ''; document.getElementById('search').value = ''; }   // so the new row is visible
   const row = await api('POST', '/api/rows', { code: '', values: columns.map(() => 0) });
   rows.push(row);
   render(); updateToolbar();
@@ -469,6 +472,17 @@ body.addEventListener('keydown', async (e) => {
 body.addEventListener('wheel', (e) => {
   if (e.target.matches('input[type=number]') && document.activeElement === e.target) e.target.blur();
 }, { passive: true });
+
+// Number cells show commas when idle and plain digits while you edit them.
+body.addEventListener('focusin', (e) => { if (e.target.matches('input.num')) e.target.value = e.target.value.replace(/,/g, ''); });
+body.addEventListener('input', (e) => {
+  if (!e.target.matches('input.num')) return;
+  const clean = e.target.value.replace(/[^0-9.\-]/g, '');   // digits, decimal point and minus only
+  if (clean !== e.target.value) e.target.value = clean;
+});
+body.addEventListener('focusout', (e) => {
+  if (e.target.matches('input.num')) e.target.value = fmt(parseNum(e.target.value));
+});
 
 // Clicking or tabbing into a cell selects its whole value, so typing replaces it.
 let justFocused = false;
